@@ -26,6 +26,7 @@ import os
 import time
 import urllib.parse
 import requests
+import html
 
 
 # ── Punkt-im-Polygon (Ray-Casting) ───────────────────────────────────────────
@@ -238,6 +239,68 @@ def print_links(rows, title, n):
         elev = f"{r['elevation_m']:.0f} m" if r["elevation_m"] else "n/a"
         print(f"  {rank:>3}  {elev:>7}  {osm_link(r):<48}  {gmaps_link(r)}")
 
+# ── HTML - Ausgabe ───────────────────────────────────────────────────────────
+
+def write_html_report(filename, data):
+    def row(r, rank):
+        name = r.get("tags", {}).get("name") or r.get("tags", {}).get("description") or ""
+        elev = f'{r["elevation_m"]:.1f}' if r.get("elevation_m") is not None else "n/a"
+        return f"""
+        <tr>
+          <td>{rank}</td>
+          <td>{html.escape(elev)}</td>
+          <td>{r["lat"]:.5f}</td>
+          <td>{r["lon"]:.5f}</td>
+          <td>{html.escape(name)}</td>
+          <td><a href="{html.escape(r["osm_url"])}" target="_blank">OSM</a></td>
+          <td><a href="{html.escape(r["gmaps_url"])}" target="_blank">Google Maps</a></td>
+        </tr>"""
+
+    def table(title, rows):
+        body = "\n".join(row(r, i) for i, r in enumerate(rows, 1))
+        return f"""
+        <h2>{html.escape(title)}</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Höhe m</th><th>Lat</th><th>Lon</th><th>Name</th><th>OSM</th><th>Google Maps</th>
+            </tr>
+          </thead>
+          <tbody>{body}</tbody>
+        </table>"""
+
+    content = f"""<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>POTA Spot Finder Ergebnisse</title>
+<style>
+:root {{ color-scheme: dark;}}
+body {{  font-family: system-ui, sans-serif;  margin: 2rem;  background: #0d1117;  color: #e6edf3;}}
+h1 {{  margin-bottom: .2rem;  color: #f0f6fc;}}
+h2 {{  margin-top: 2rem;  color: #f0f6fc;}}
+.card {{  background: #161b22;  padding: 1.5rem;  border-radius: 14px;  box-shadow: 0 2px 18px #0008;  border: 1px solid #30363d;}}
+table {{  width: 100%;  border-collapse: collapse;  margin: 1rem 0 2rem;}}
+th, td {{ padding: .65rem .8rem;  border-bottom: 1px solid #30363d;  text-align: left;}}
+th {{  background: #21262d;  color: #f0f6fc;}}
+tr:hover {{  background: #1f6feb22;}}
+a {{  color: #58a6ff;  font-weight: 600;}}
+a:hover {{  color: #79c0ff;}}
+.meta {{  color: #8b949e;  margin-bottom: 2rem;}}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>POTA Spot Finder Ergebnisse</h1>
+<div class="meta">Park: {html.escape(data.get("park", {}).get("id", "Unbekannt"))} - {html.escape(data.get("park", {}).get("name", "Unbekannt"))}</div>
+{table("Picknicktische", data.get("picnic_tables", []))}
+{table("Bänke", data.get("benches", []))}
+</div>
+</body>
+</html>"""
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
 
 # ── Hauptprogramm ─────────────────────────────────────────────────────────────
 
@@ -263,6 +326,12 @@ def main():
         "-o", "--output",
         default=None, metavar="FILE",
         help="JSON-Ausgabedatei (Standard: results_<parkname>.json)"
+    )
+    parser.add_argument(
+        "--html-output",
+        default=None,
+        metavar="FILE",
+        help="HTML-Ausgabedatei (Standard: wie JSON, aber .html)"
     )
     args = parser.parse_args()
 
@@ -338,21 +407,33 @@ def main():
     print_links(picnic_sorted, f"Links Picknicktische Top {args.tables}", n=args.tables)
     print_links(bench_sorted,  f"Links Baenke Top {args.benches}",        n=args.benches)
 
-    # JSON speichern
+    # Data enrichment
     def enrich(r):
         return {**r, "osm_url": osm_link(r), "gmaps_url": gmaps_link(r)}
 
+    # Resultat in variable zwischenspeichern
+    result_data = {
+        "park": feature.get("properties", {}),
+        "query": {
+            "top_tables": args.tables,
+            "top_benches": args.benches,
+        },
+        "picnic_tables": [enrich(r) for r in picnic_sorted[:args.tables]],
+        "benches": [enrich(r) for r in bench_sorted[:args.benches]],
+    }
+
+    # JSON speichern
     with open(args.output, "w", encoding="utf-8") as f:
-        json.dump({
-            "park":         feature.get("properties", {}),
-            "query": {
-                "top_tables":  args.tables,
-                "top_benches": args.benches,
-            },
-            "picnic_tables": [enrich(r) for r in picnic_sorted[:args.tables]],
-            "benches":       [enrich(r) for r in bench_sorted[:args.benches]],
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(result_data, f, ensure_ascii=False, indent=2)
+
     print(f"\nGespeichert: {args.output}")
+
+    # HTML Ausgabe wenn gewuenscht
+    if args.html_output is None:
+        args.html_output = os.path.splitext(args.output)[0] + ".html"
+
+    write_html_report(args.html_output, result_data)
+    print(f"HTML gespeichert: {args.html_output}")
 
 
 if __name__ == "__main__":
