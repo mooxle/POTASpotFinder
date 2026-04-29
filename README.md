@@ -11,7 +11,8 @@ As a POTA activator you want to operate from a great location. This tool takes t
 - Works with **any POTA park** that has a GeoJSON boundary on pota-map.info
 - Fetches amenities live from **OpenStreetMap** via the Overpass API
 - Accurate **point-in-polygon filtering** (ray-casting) — no false positives from the bounding box
-- **Elevation ranking** via the Open-Elevation API
+- **Elevation ranking** via Open-Topo-Data (SRTM30m), with automatic fallback to Open-Elevation
+- Automatic **retry with exponential backoff** if an elevation provider is slow or overloaded
 - One-click links to **OpenStreetMap** and **Google Maps** (with photo previews) for every result
 - Fully configurable: choose how many tables and benches to return
 - Saves results as **JSON** for further processing
@@ -137,7 +138,7 @@ Results are saved as structured JSON for easy reuse:
 1. **Load boundary** — reads the GeoJSON polygon from pota-map.info
 2. **Overpass API** — queries OpenStreetMap for `leisure=picnic_table` and `amenity=bench` within the bounding box (with automatic fallback to mirror servers)
 3. **Point-in-polygon** — filters results using a ray-casting algorithm to ensure only objects truly inside the park boundary are kept
-4. **Elevation** — queries [Open-Elevation](https://api.open-elevation.com) in batches for every found location
+4. **Elevation** — queries [Open-Topo-Data](https://www.opentopodata.org) (SRTM30m) in batches; falls back to [Open-Elevation](https://api.open-elevation.com) for any failed batches. Each batch is retried up to 3× with exponential backoff before failing over.
 5. **Rank & output** — sorts by elevation descending, prints tables, and saves JSON
 
 ---
@@ -148,7 +149,8 @@ Results are saved as structured JSON for easy reuse:
 |---|---|
 | [pota-map.info](https://pota-map.info) | Park boundary GeoJSON files |
 | [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | Benches and picnic tables |
-| [Open-Elevation](https://api.open-elevation.com) | Elevation data (SRTM-based) |
+| [Open-Topo-Data](https://www.opentopodata.org) | Elevation data — primary (SRTM30m) |
+| [Open-Elevation](https://api.open-elevation.com) | Elevation data — fallback (SRTM) |
 
 ---
 
@@ -161,11 +163,12 @@ Results are saved as structured JSON for easy reuse:
 
 ---
 
+## 🤖 Transparency
+
+The idea and concept behind this tool were conceived by **mooxle (DA6MAX)**. The code was generated with the assistance of [Claude](https://claude.ai) by Anthropic.
+
+---
+
 ## 73 de the field
 
 *Built for POTA activators who want to make the most of their time on the air — and enjoy the view while doing it.*
-
-🤖 Transparency
-The idea and concept behind this tool were conceived by mooxle (DA6MAX). The code was generated with the assistance of Claude by Anthropic.
-
-
