@@ -116,23 +116,94 @@ def elements_to_points(elements):
 
 
 # ── Hoehenabfrage ─────────────────────────────────────────────────────────────
+#
+# Reihenfolge der Provider:
+#   1. open-topo-data.com  (SRTM30m, zuverlaessiger, kein API-Key)
+#   2. open-elevation.com  (Fallback, haeufig ueberlastet)
+#
+# Pro Batch: bis zu RETRY_COUNT Versuche mit exponentiellem Backoff.
 
-def get_elevations(points, batch_size=100):
-    url = "https://api.open-elevation.com/api/v1/lookup"
-    all_elevations = []
-    for i in range(0, len(points), batch_size):
-        batch = points[i : i + batch_size]
-        locations = [{"latitude": p["lat"], "longitude": p["lon"]} for p in batch]
-        print(f"  → Batch {i // batch_size + 1} ({len(batch)} Punkte) ...")
+ELEVATION_PROVIDERS = [
+    {
+        "name": "open-topo-data (SRTM30m)",
+        "url":  "https://api.opentopodata.org/v1/srtm30m",
+        # opentopodata erwartet locations als "lat,lon|lat,lon|..."
+        "build_payload": lambda locs: {"locations": "|".join(f"{l['latitude']},{l['longitude']}" for l in locs)},
+        "parse":         lambda data: [r.get("elevation") for r in data.get("results", [])],
+        "method":        "GET",   # opentopodata bevorzugt GET mit query-param
+        "batch_size":    100,
+    },
+    {
+        "name": "open-elevation.com",
+        "url":  "https://api.open-elevation.com/api/v1/lookup",
+        "build_payload": lambda locs: {"locations": locs},
+        "parse":         lambda data: [r.get("elevation") for r in data.get("results", [])],
+        "method":        "POST",
+        "batch_size":    100,
+    },
+]
+
+RETRY_COUNT = 3
+
+
+def _fetch_batch(provider, locations):
+    """Einzelner Batch-Request an einen Provider. Gibt Liste von Hoehenmetern zurueck."""
+    payload = provider["build_payload"](locations)
+    for attempt in range(1, RETRY_COUNT + 1):
         try:
-            resp = requests.post(url, json={"locations": locations}, timeout=60)
+            if provider["method"] == "GET":
+                resp = requests.get(provider["url"], params=payload, timeout=45)
+            else:
+                resp = requests.post(provider["url"], json=payload, timeout=45)
             resp.raise_for_status()
-            results = resp.json().get("results", [])
-            all_elevations.extend([r.get("elevation") for r in results])
+            return provider["parse"](resp.json())
         except Exception as e:
-            print(f"    Fehler: {e}")
-            all_elevations.extend([None] * len(batch))
-        time.sleep(0.5)
+            wait = 2 ** attempt
+            if attempt < RETRY_COUNT:
+                print(f"    Versuch {attempt} fehlgeschlagen ({e}) – warte {wait}s ...")
+                time.sleep(wait)
+            else:
+                raise
+
+
+def get_elevations(points):
+    """
+    Fragt Hoehendaten fuer alle Punkte ab.
+    Versucht Provider der Reihe nach; faellt ein Provider aus, wird der naechste probiert.
+    """
+    all_elevations = [None] * len(points)
+    remaining_idx  = list(range(len(points)))   # Indizes noch ohne Hoehenangabe
+
+    for provider in ELEVATION_PROVIDERS:
+        if not remaining_idx:
+            break
+
+        batch_size = provider["batch_size"]
+        name       = provider["name"]
+        print(f"\n  Provider: {name}")
+
+        failed_idx = []
+        batches    = [remaining_idx[i : i + batch_size] for i in range(0, len(remaining_idx), batch_size)]
+
+        for b_num, idx_batch in enumerate(batches, 1):
+            batch_points = [points[i] for i in idx_batch]
+            locations    = [{"latitude": p["lat"], "longitude": p["lon"]} for p in batch_points]
+            print(f"  → Batch {b_num}/{len(batches)} ({len(idx_batch)} Punkte) ...", end=" ", flush=True)
+            try:
+                elevs = _fetch_batch(provider, locations)
+                for idx, elev in zip(idx_batch, elevs):
+                    all_elevations[idx] = elev
+                print(f"OK")
+            except Exception as e:
+                print(f"FEHLER ({e})")
+                failed_idx.extend(idx_batch)
+            time.sleep(0.6)
+
+        remaining_idx = failed_idx
+
+    if remaining_idx:
+        print(f"  ⚠  {len(remaining_idx)} Punkte ohne Hoehenangabe (alle Provider fehlgeschlagen).")
+
     return all_elevations
 
 
@@ -247,9 +318,10 @@ def main():
         return
 
     # Hoehenabfrage
-    print("\n-- Open-Elevation -------------------------------------------------------")
+    print("\n-- Hoehenabfrage --------------------------------------------------------")
     all_points = picnic_tables + benches
     elevations = get_elevations(all_points)
+
     for i, pt in enumerate(all_points):
         pt["elevation_m"] = elevations[i] if i < len(elevations) else None
 
