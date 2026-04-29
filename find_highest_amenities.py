@@ -329,6 +329,8 @@ def main():
     )
     parser.add_argument(
         "--html-output",
+        nargs="?",
+        const=True,
         default=None,
         metavar="FILE",
         help="HTML-Ausgabedatei (Standard: wie JSON, aber .html)"
@@ -429,12 +431,16 @@ def main():
     print(f"\nGespeichert: {args.output}")
 
     # HTML Ausgabe wenn gewuenscht
-    if args.html_output is None:
-        args.html_output = os.path.splitext(args.output)[0] + ".html"
+    if args.html_output is not None:
+        base = os.path.splitext(os.path.basename(args.geojson))[0]
 
-    write_html_report(args.html_output, result_data)
-    print(f"HTML gespeichert: {args.html_output}")
+        if args.html_output is True:
+            html_file = f"results_{base}.html"
+        else:
+            html_file = args.html_output
 
+        write_html_report(html_file, result_data)
+        print(f"HTML gespeichert: {html_file}")
 
 if __name__ == "__main__":
     main()
