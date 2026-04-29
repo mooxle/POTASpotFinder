@@ -57,6 +57,8 @@ python3 find_highest_amenities.py <geojson> [options]
 | `-t`, `--tables N` | Show top-N picnic tables (default: **10**) |
 | `-b`, `--benches N` | Show top-N benches (default: **20**) |
 | `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
+| `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
+| `--html-output` | Outputs result as HTML (default: `results_<parkname>.html`) |
 
 ### Examples
 
@@ -72,6 +74,12 @@ python3 find_highest_amenities.py DE-0042.geojson -t 5 -b 10
 
 # Custom output file
 python3 find_highest_amenities.py DE-0042.geojson -t 15 -b 30 -o vogelsberg.json
+
+# Add HTML output with default filename
+python3 find_highest_amenities.py DE-0042.geojson --html-output
+
+# Add HTML output with our own filename
+python3 find_highest_amenities.py DE-0042.geojson --html-output my_own_filename.html
 
 # Any other park
 python3 find_highest_amenities.py US-1234.geojson -t 10 -b 20
