@@ -57,7 +57,6 @@ python3 find_highest_amenities.py <geojson> [options]
 | `-t`, `--tables N` | Show top-N picnic tables (default: **10**) |
 | `-b`, `--benches N` | Show top-N benches (default: **20**) |
 | `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
-| `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
 | `--html-output` | Outputs result as HTML (default: `results_<parkname>.html`) |
 
 ### Examples
