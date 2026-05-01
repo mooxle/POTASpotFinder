@@ -45,6 +45,7 @@ Requires: pip install requests
 """
 
 import argparse
+import hashlib
 import html as html_lib
 import json
 import math
@@ -116,16 +117,126 @@ def load_geojson(path):
 # SHARED — OVERPASS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# These constants control API behaviour. Override them before calling the
+# Python API functions if you need different limits for your use case.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Overpass mirror servers — tried in order until one succeeds
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    # "https://maps.mail.ru/osm/tools/overpass/api/interpreter",  # disabled by default
 ]
+
+# Maximum requests per second for each API (set lower to be a better citizen)
+RATE_LIMIT_OVERPASS   = 0.5   # req/s  — Overpass fair-use recommendation
+RATE_LIMIT_OPENTOPO   = 1.0   # req/s  — open-topo-data.org guidelines
+RATE_LIMIT_OPENELEVATION = 0.5  # req/s — conservative for open-elevation.com
+
+# Elevation cache: stores results on disk so repeated runs skip API calls entirely
+ELEVATION_CACHE_ENABLED = True
+ELEVATION_CACHE_FILE    = ".cache_elevation.json"
+
 HEADERS = {
     "Accept":       "*/*",
     "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent":   "POTA-finder/3.0",
+    "User-Agent":   "POTA-finder/3.0 (github.com/mooxle/pota-finder; personal/low-volume use)",
 }
+
+# ODbL requires attribution wherever OSM data is used or displayed
+OSM_ATTRIBUTION = {
+    "osm":       "© OpenStreetMap contributors, ODbL 1.0 — https://www.openstreetmap.org/copyright",
+    "elevation": "SRTM elevation data, public domain — NASA/USGS",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RATE LIMITER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_rate_last: dict = {}
+
+def _rate_limit(key: str, per_second: float) -> None:
+    """
+    Blocks until the minimum interval for `key` has elapsed.
+    Call before every outbound API request.
+
+    Args:
+        key:        Identifier for the API endpoint (e.g. "overpass", "opentopo")
+        per_second: Maximum allowed requests per second
+    """
+    now     = time.monotonic()
+    min_gap = 1.0 / per_second
+    last    = _rate_last.get(key, 0.0)
+    gap     = now - last
+    if gap < min_gap:
+        time.sleep(min_gap - gap)
+    _rate_last[key] = time.monotonic()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELEVATION CACHE
+# Persists elevation results to disk so subsequent runs need zero API calls
+# for already-queried coordinates.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_elev_cache: dict = {}
+_elev_cache_dirty = False
+
+
+def _load_elevation_cache() -> None:
+    global _elev_cache
+    if not ELEVATION_CACHE_ENABLED:
+        return
+    if os.path.exists(ELEVATION_CACHE_FILE):
+        try:
+            with open(ELEVATION_CACHE_FILE, "r") as f:
+                _elev_cache = json.load(f)
+            print(f"  Elevation cache loaded: {len(_elev_cache)} entries ({ELEVATION_CACHE_FILE})")
+        except Exception:
+            _elev_cache = {}
+
+
+def _save_elevation_cache() -> None:
+    if not ELEVATION_CACHE_ENABLED or not _elev_cache_dirty:
+        return
+    try:
+        with open(ELEVATION_CACHE_FILE, "w") as f:
+            json.dump(_elev_cache, f)
+    except Exception as e:
+        print(f"  ⚠  Could not save elevation cache: {e}")
+
+
+def _elev_cache_key(lat: float, lon: float) -> str:
+    """Rounds to ~11m precision to maximise cache hits."""
+    return f"{lat:.4f},{lon:.4f}"
+
+
+def _cached_elevations(points: list) -> tuple[list, list]:
+    """
+    Splits points into cache hits and misses.
+    Returns (elevations_list, miss_indices) where elevations_list[i] is None for misses.
+    """
+    elevations = [None] * len(points)
+    misses     = []
+    for i, p in enumerate(points):
+        key = _elev_cache_key(p["lat"], p["lon"])
+        if key in _elev_cache:
+            elevations[i] = _elev_cache[key]
+        else:
+            misses.append(i)
+    return elevations, misses
+
+
+def _store_elevations(points: list, indices: list, values: list) -> None:
+    global _elev_cache_dirty
+    for idx, val in zip(indices, values):
+        if val is not None:
+            key = _elev_cache_key(points[idx]["lat"], points[idx]["lon"])
+            _elev_cache[key] = val
+            _elev_cache_dirty = True
 
 # Overpass query for elevation mode (single category)
 def _overpass_query_single(bbox, key, value):
@@ -162,16 +273,18 @@ out center tags;
 
 
 def _run_overpass(query):
-    """Sends an Overpass query, tries all mirror servers."""
+    """Sends an Overpass query, tries all mirror servers. Rate-limited."""
     for endpoint in OVERPASS_ENDPOINTS:
         print(f"  → {endpoint.split('/')[2]} ...")
         try:
+            _rate_limit("overpass", RATE_LIMIT_OVERPASS)
             resp = requests.post(
                 endpoint,
                 data=urllib.parse.urlencode({"data": query}),
                 headers=HEADERS, timeout=150,
             )
             if resp.status_code == 406:
+                _rate_limit("overpass", RATE_LIMIT_OVERPASS)
                 resp = requests.get(endpoint, params={"data": query},
                                     headers={"Accept": "*/*", "User-Agent": "POTA-finder/3.0"},
                                     timeout=150)
@@ -221,9 +334,14 @@ RETRY_COUNT = 3
 
 
 def _fetch_elevation_batch(provider, locations):
-    payload = provider["build_payload"](locations)
+    """Fetches one batch from a provider. Rate-limited + retry."""
+    rate_key = "opentopo" if "opentopodata" in provider["url"] else "openelevation"
+    rate_val = RATE_LIMIT_OPENTOPO if rate_key == "opentopo" else RATE_LIMIT_OPENELEVATION
+    payload  = provider["build_payload"](locations)
+
     for attempt in range(1, RETRY_COUNT + 1):
         try:
+            _rate_limit(rate_key, rate_val)
             if provider["method"] == "GET":
                 r = requests.get(provider["url"], params=payload, timeout=45)
             else:
@@ -242,10 +360,20 @@ def _fetch_elevation_batch(provider, locations):
 def get_elevations(points):
     """
     Fetches elevation data for a list of {lat, lon} dicts.
-    Tries providers in order, falls back to the next on failure.
+
+    1. Checks the persistent on-disk cache first — zero API calls for known coords.
+    2. Fetches only cache misses, trying providers in order with rate limiting.
+    3. Stores new results back into the cache.
     """
-    all_elev  = [None] * len(points)
-    remaining = list(range(len(points)))
+    # Cache lookup
+    all_elev, miss_idx = _cached_elevations(points)
+    hits = len(points) - len(miss_idx)
+    if hits:
+        print(f"  Elevation cache: {hits} hits, {len(miss_idx)} misses")
+    if not miss_idx:
+        return all_elev
+
+    remaining = miss_idx
 
     for provider in ELEVATION_PROVIDERS:
         if not remaining:
@@ -264,13 +392,15 @@ def get_elevations(points):
                 elevs = _fetch_elevation_batch(provider, locs)
                 for idx, elev in zip(idx_batch, elevs):
                     all_elev[idx] = elev
+                _store_elevations(points, idx_batch, elevs)
                 print("OK")
             except Exception as e:
                 print(f"FAILED ({e})")
                 failed.extend(idx_batch)
-            time.sleep(0.6)
 
         remaining = failed
+
+    _save_elevation_cache()
 
     if remaining:
         print(f"  ⚠  {len(remaining)} points with no elevation data.")
@@ -333,6 +463,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
     Returns:
         Dict with "mode", "park", "spots"
     """
+    _load_elevation_cache()
     polygon, park_props, bbox = load_geojson(geojson_path)
     park_name = park_props.get("name") or os.path.basename(geojson_path)
     print(f"  Park:  {park_name}")
@@ -424,7 +555,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
                 "tags":        pt.get("tags", {}),
             })
 
-    return {"mode": "elevation", "park": park_props, "spots": spots}
+    return {"mode": "elevation", "park": park_props, "_attribution": OSM_ATTRIBUTION, "spots": spots}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -627,6 +758,7 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
     print(f"  Park:  {park_name}")
     print(f"  BBox:  S={bbox[0]:.4f} W={bbox[1]:.4f} N={bbox[2]:.4f} E={bbox[3]:.4f}")
 
+    _load_elevation_cache()
     # Overpass (with cache)
     cached = None if refresh else _load_cache(geojson_path)
     if cached:
@@ -646,7 +778,7 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
     print(f"  {comfort_total} comfort objects → {len(spots)} spot candidates")
 
     if not spots:
-        return {"mode": "score", "park": park_props, "spots": []}
+        return {"mode": "score", "park": park_props, "_attribution": OSM_ATTRIBUTION, "spots": []}
 
     # Elevation + prominence
     spots = _fetch_elevations_with_neighbors(spots)
@@ -698,7 +830,7 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
             "tags":              anc.get("tags", {}),
         })
 
-    return {"mode": "score", "park": park_props, "spots": result_spots}
+    return {"mode": "score", "park": park_props, "_attribution": OSM_ATTRIBUTION, "spots": result_spots}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -833,6 +965,16 @@ def _write_html_file(filename, park_name, title, thead, tbody, subtitle=""):
 <h1>🏕 {html_lib.escape(title)} — {html_lib.escape(park_name)}</h1>
 <p class="sub">{html_lib.escape(subtitle)}</p>
 <table><thead>{thead}</thead><tbody>{tbody}</tbody></table>
+<footer style="margin-top:40px;padding-top:16px;border-top:1px solid #1a2420;
+               font-size:11px;color:#3a5040;font-family:monospace">
+  © <a href="https://www.openstreetmap.org/copyright" target="_blank"
+       style="color:#3a5040">OpenStreetMap contributors</a>,
+  <a href="https://opendatacommons.org/licenses/odbl/" target="_blank"
+     style="color:#3a5040">ODbL 1.0</a>
+  &nbsp;·&nbsp; Elevation: SRTM, public domain (NASA/USGS)
+  &nbsp;·&nbsp; Park boundaries: <a href="https://pota-map.info" target="_blank"
+                                    style="color:#3a5040">pota-map.info</a>
+</footer>
 </body></html>"""
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
