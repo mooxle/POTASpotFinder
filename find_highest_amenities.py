@@ -2,19 +2,22 @@
 find_highest_amenities.py
 =========================
 Sucht innerhalb eines beliebigen GeoJSON-Polygons nach den
-hoechstgelegenen Picknicktischen und Baenken.
+hoechstgelegenen Picknicktischen, Baenken und Liegen.
 
 Verwendung:
-  python3 find_highest_amenities.py DE-0042.geojson
-  python3 find_highest_amenities.py DE-0042.geojson --tables 10 --benches 20
-  python3 find_highest_amenities.py andere_park.geojson --tables 5 --benches 5
-  python3 find_highest_amenities.py park.geojson -t 10 -b 20 -o ergebnisse.json
+  python3 find_highest_amenities.py DE-0042.geojson            # alle 3 Kategorien, Top 5
+  python3 find_highest_amenities.py DE-0042.geojson -l 5       # nur Liegen, Top 5
+  python3 find_highest_amenities.py DE-0042.geojson -t 10 -b 20  # nur Tische + Baenke
+  python3 find_highest_amenities.py park.geojson -t 10 -b 20 -l 5 -o ergebnisse.json
+  python3 find_highest_amenities.py park.geojson --html-output
 
 Optionen:
-  geojson            Pfad zur GeoJSON-Datei (Pflicht)
-  -t, --tables N     Top-N Picknicktische (Standard: 10)
-  -b, --benches N    Top-N Baenke         (Standard: 20)
-  -o, --output FILE  JSON-Ausgabedatei    (Standard: results_<parkname>.json)
+  geojson              Pfad zur GeoJSON-Datei (Pflicht)
+  -t, --tables N       Top-N Picknicktische  (ohne Argumente: alle 3 Kategorien Top 5)
+  -b, --benches N      Top-N Baenke          (einzelne Flags -> nur diese Kategorie)
+  -l, --loungers N     Top-N Liegen/Lounger  (einzelne Flags -> nur diese Kategorie)
+  -o, --output FILE    JSON-Ausgabedatei     (Standard: results_<parkname>.json)
+  --html-output [FILE] Zusaetzlich HTML-Bericht erzeugen (Standard: results_<parkname>.html)
 
 Benoetigt: pip install requests
 """
@@ -306,7 +309,7 @@ a:hover {{  color: #79c0ff;}}
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Findet die hoechstgelegenen Picknicktische und Baenke in einem GeoJSON-Park."
+        description="Findet die hoechstgelegenen Picknicktische, Baenke und Liegen in einem GeoJSON-Park."
     )
     parser.add_argument(
         "geojson",
@@ -314,13 +317,18 @@ def main():
     )
     parser.add_argument(
         "-t", "--tables",
-        type=int, default=10, metavar="N",
-        help="Top-N Picknicktische anzeigen (Standard: 10)"
+        type=int, default=None, metavar="N",
+        help="Top-N Picknicktische (Standard: 5; nur diese Kategorie wenn explizit angegeben)"
     )
     parser.add_argument(
         "-b", "--benches",
-        type=int, default=20, metavar="N",
-        help="Top-N Baenke anzeigen (Standard: 20)"
+        type=int, default=None, metavar="N",
+        help="Top-N Baenke (Standard: 5; nur diese Kategorie wenn explizit angegeben)"
+    )
+    parser.add_argument(
+        "-l", "--loungers",
+        type=int, default=None, metavar="N",
+        help="Top-N Liegen/Lounger (Standard: 5; nur diese Kategorie wenn explizit angegeben)"
     )
     parser.add_argument(
         "-o", "--output",
@@ -365,32 +373,61 @@ def main():
     lats = [c[1] for c in polygon]
     bbox = (min(lats), min(lons), max(lats), max(lons))
     print(f"  BBox:    S={bbox[0]:.4f} W={bbox[1]:.4f} N={bbox[2]:.4f} E={bbox[3]:.4f}")
-    print(f"  Suche:   Top {args.tables} Picknicktische, Top {args.benches} Baenke")
+    # Logik: keine Argumente -> alle Kategorien mit je Top 5
+    #         mind. ein Argument -> nur die explizit genannten Kategorien
+    any_explicit = any(x is not None for x in [args.tables, args.benches, args.loungers])
+    n_tables   = args.tables   if args.tables   is not None else (5 if not any_explicit else None)
+    n_benches  = args.benches  if args.benches  is not None else (5 if not any_explicit else None)
+    n_loungers = args.loungers if args.loungers is not None else (5 if not any_explicit else None)
 
-    # Overpass
+    active = {
+        "tables":   n_tables   is not None,
+        "benches":  n_benches  is not None,
+        "loungers": n_loungers is not None,
+    }
+    suche_parts = []
+    if active["tables"]:   suche_parts.append(f"Top {n_tables} Picknicktische")
+    if active["benches"]:  suche_parts.append(f"Top {n_benches} Baenke")
+    if active["loungers"]: suche_parts.append(f"Top {n_loungers} Liegen")
+    print(f"  Suche:   {', '.join(suche_parts) or '(keine Kategorien aktiv)'}") 
+
+    # Overpass — nur aktive Kategorien abfragen
     print("\n-- Overpass-Abfragen ----------------------------------------------------")
-    print("  leisure=picnic_table")
-    raw_picnic = query_overpass(bbox, "leisure", "picnic_table")
-    time.sleep(2)
-    print("  amenity=bench")
-    raw_bench  = query_overpass(bbox, "amenity", "bench")
+    picnic_tables, benches, loungers = [], [], []
 
-    # Polygon-Filter
-    picnic_all    = elements_to_points(raw_picnic)
-    bench_all     = elements_to_points(raw_bench)
-    picnic_tables = [p for p in picnic_all if point_in_polygon(p["lat"], p["lon"], polygon)]
-    benches       = [p for p in bench_all  if point_in_polygon(p["lat"], p["lon"], polygon)]
+    if active["tables"]:
+        print("  leisure=picnic_table")
+        raw = query_overpass(bbox, "leisure", "picnic_table")
+        all_pts = elements_to_points(raw)
+        picnic_tables = [p for p in all_pts if point_in_polygon(p["lat"], p["lon"], polygon)]
+        print(f"    Im Park: {len(picnic_tables)} / {len(all_pts)}")
+        time.sleep(2)
 
-    print(f"\n  Bbox:    {len(picnic_all)} Picknicktische, {len(bench_all)} Baenke")
-    print(f"  Im Park: {len(picnic_tables)} Picknicktische, {len(benches)} Baenke")
+    if active["benches"]:
+        print("  amenity=bench")
+        raw = query_overpass(bbox, "amenity", "bench")
+        all_pts = elements_to_points(raw)
+        benches = [p for p in all_pts if point_in_polygon(p["lat"], p["lon"], polygon)]
+        print(f"    Im Park: {len(benches)} / {len(all_pts)}")
+        time.sleep(2)
 
-    if not picnic_tables and not benches:
+    if active["loungers"]:
+        print("  leisure=lounger")
+        raw = query_overpass(bbox, "leisure", "lounger")
+        all_pts = elements_to_points(raw)
+        loungers = [p for p in all_pts if point_in_polygon(p["lat"], p["lon"], polygon)]
+        print(f"    Im Park: {len(loungers)} / {len(all_pts)}")
+
+    if not picnic_tables and not benches and not loungers:
         print("Keine Objekte im Park gefunden.")
         return
 
-    # Hoehenabfrage
+    # Hoehenabfrage — nur nicht-leere Kategorien
     print("\n-- Hoehenabfrage --------------------------------------------------------")
-    all_points = picnic_tables + benches
+    all_points = picnic_tables + benches + loungers
+    if not all_points:
+        print("Nichts zu parsen.")
+        return
     elevations = get_elevations(all_points)
 
     for i, pt in enumerate(all_points):
@@ -400,14 +437,28 @@ def main():
     def sort_key(p):
         return p["elevation_m"] if p["elevation_m"] is not None else -math.inf
 
-    picnic_sorted = sorted(picnic_tables, key=sort_key, reverse=True)
-    bench_sorted  = sorted(benches,       key=sort_key, reverse=True)
+    picnic_sorted  = sorted(picnic_tables, key=sort_key, reverse=True)
+    bench_sorted   = sorted(benches,       key=sort_key, reverse=True)
+    lounger_sorted = sorted(loungers,      key=sort_key, reverse=True)
 
-    # Ausgabe
-    format_table(picnic_sorted, "Hoechstgelegene Picknicktische", n=args.tables)
-    format_table(bench_sorted,  "Hoechstgelegene Baenke",         n=args.benches)
-    print_links(picnic_sorted, f"Links Picknicktische Top {args.tables}", n=args.tables)
-    print_links(bench_sorted,  f"Links Baenke Top {args.benches}",        n=args.benches)
+    # Ausgabe — leere Kategorien ueberspringen
+    if picnic_sorted:
+        format_table(picnic_sorted, "Hoechstgelegene Picknicktische", n=n_tables)
+        print_links(picnic_sorted, f"Links Picknicktische Top {n_tables}", n=n_tables)
+    else:
+        print("\n  Keine Picknicktische im Park gefunden — uebersprungen.")
+
+    if bench_sorted:
+        format_table(bench_sorted, "Hoechstgelegene Baenke", n=n_benches)
+        print_links(bench_sorted, f"Links Baenke Top {n_benches}", n=n_benches)
+    else:
+        print("\n  Keine Baenke im Park gefunden — uebersprungen.")
+
+    if lounger_sorted:
+        format_table(lounger_sorted, "Hoechstgelegene Liegen", n=n_loungers)
+        print_links(lounger_sorted, f"Links Liegen Top {n_loungers}", n=n_loungers)
+    else:
+        print("\n  Keine Liegen im Park gefunden — uebersprungen.")
 
     # Data enrichment
     def enrich(r):
@@ -417,11 +468,13 @@ def main():
     result_data = {
         "park": feature.get("properties", {}),
         "query": {
-            "top_tables": args.tables,
-            "top_benches": args.benches,
+            "top_tables":   n_tables,
+            "top_benches":  n_benches,
+            "top_loungers": n_loungers,
         },
-        "picnic_tables": [enrich(r) for r in picnic_sorted[:args.tables]],
-        "benches": [enrich(r) for r in bench_sorted[:args.benches]],
+        "picnic_tables": [enrich(r) for r in picnic_sorted[:n_tables]],
+        "benches":       [enrich(r) for r in bench_sorted[:n_benches]],
+        "loungers":      [enrich(r) for r in lounger_sorted[:n_loungers]],
     }
 
     # JSON speichern
