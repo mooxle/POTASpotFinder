@@ -139,6 +139,12 @@ RATE_LIMIT_OPENELEVATION = 0.5  # req/s — conservative for open-elevation.com
 ELEVATION_CACHE_ENABLED = True
 ELEVATION_CACHE_FILE    = ".cache_elevation.json"
 
+# Open-Topo-Data daily limit (free tier: 1000 req/day).
+# The tool tracks batch calls and warns when you approach the limit.
+# Each batch = 1 request. Set to None to disable the warning.
+OPENTOPO_DAILY_LIMIT    = 1000
+OPENTOPO_DAILY_WARN_AT  = 900   # warn when this many requests used today
+
 HEADERS = {
     "Accept":       "*/*",
     "Content-Type": "application/x-www-form-urlencoded",
@@ -238,6 +244,52 @@ def _store_elevations(points: list, indices: list, values: list) -> None:
             _elev_cache[key] = val
             _elev_cache_dirty = True
 
+
+# ── Open-Topo-Data daily usage tracking ──────────────────────────────────────
+
+_DAILY_COUNTER_FILE = ".cache_opentopo_daily.json"
+
+
+def _opentopo_usage_today() -> int:
+    """Returns the number of Open-Topo-Data batch requests made today."""
+    try:
+        with open(_DAILY_COUNTER_FILE) as f:
+            data = json.load(f)
+        today = time.strftime("%Y-%m-%d")
+        return data.get(today, 0)
+    except Exception:
+        return 0
+
+
+def _opentopo_increment() -> int:
+    """Increments today's Open-Topo-Data counter and returns the new total."""
+    today = time.strftime("%Y-%m-%d")
+    try:
+        with open(_DAILY_COUNTER_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    # Prune old dates to keep the file small
+    data = {k: v for k, v in data.items() if k == today}
+    data[today] = data.get(today, 0) + 1
+    with open(_DAILY_COUNTER_FILE, "w") as f:
+        json.dump(data, f)
+    return data[today]
+
+
+def _opentopo_check_limit() -> None:
+    """Warns or aborts if the daily Open-Topo-Data limit is approached."""
+    if OPENTOPO_DAILY_LIMIT is None:
+        return
+    used = _opentopo_usage_today()
+    if used >= OPENTOPO_DAILY_LIMIT:
+        raise RuntimeError(
+            f"Open-Topo-Data daily limit reached ({used}/{OPENTOPO_DAILY_LIMIT} requests). "
+            f"Results may be incomplete. Try again tomorrow or use a self-hosted instance."
+        )
+    if OPENTOPO_DAILY_WARN_AT and used >= OPENTOPO_DAILY_WARN_AT:
+        print(f"  ⚠  Open-Topo-Data: {used}/{OPENTOPO_DAILY_LIMIT} daily requests used.")
+
 # Overpass query for elevation mode (single category)
 def _overpass_query_single(bbox, key, value):
     s, w, n, e = bbox
@@ -334,10 +386,13 @@ RETRY_COUNT = 3
 
 
 def _fetch_elevation_batch(provider, locations):
-    """Fetches one batch from a provider. Rate-limited + retry."""
+    """Fetches one batch from a provider. Rate-limited + daily-limit-aware + retry."""
     rate_key = "opentopo" if "opentopodata" in provider["url"] else "openelevation"
     rate_val = RATE_LIMIT_OPENTOPO if rate_key == "opentopo" else RATE_LIMIT_OPENELEVATION
     payload  = provider["build_payload"](locations)
+
+    if rate_key == "opentopo":
+        _opentopo_check_limit()
 
     for attempt in range(1, RETRY_COUNT + 1):
         try:
@@ -347,6 +402,10 @@ def _fetch_elevation_batch(provider, locations):
             else:
                 r = requests.post(provider["url"], json=payload, timeout=45)
             r.raise_for_status()
+            if rate_key == "opentopo":
+                used = _opentopo_increment()
+                if OPENTOPO_DAILY_LIMIT and used >= OPENTOPO_DAILY_LIMIT:
+                    print(f"  ⚠  Open-Topo-Data daily limit reached ({used}/{OPENTOPO_DAILY_LIMIT}).")
             return provider["parse"](r.json())
         except Exception as e:
             if attempt < RETRY_COUNT:

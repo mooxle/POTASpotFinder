@@ -237,6 +237,21 @@ Default endpoints are provided for testing only.
 
 ---
 
+## 🎯 Intended Use
+
+This tool is designed for **personal, low-frequency use** by individual POTA activators.
+
+✅ It is intended for:
+- Finding a good activation spot in a specific park before a trip
+- Running one query per park, occasionally
+
+❌ It is **not** intended for:
+- Bulk or automated data extraction
+- Repeated programmatic querying in scripts or pipelines
+- Any use that would place excessive load on the free public APIs it depends on
+
+For heavy usage, please self-host the APIs (see `DISCLAIMER.md`).
+
 ## 📝 Notes
 
 - Elevation data is SRTM-based, accurate to roughly ±10 m — sufficient for relative ranking within a park.
