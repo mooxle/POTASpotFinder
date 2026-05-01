@@ -686,32 +686,128 @@ def _grid_cluster(cats, grid_m):
     return spots
 
 
-def _fetch_elevations_with_neighbors(spots, dist_m=300):
-    """Holt Hoehen fuer jeden Spot + 4 Nachbarn (N/E/S/W) zur Prominenzberechnung."""
-    all_pts, spot_idx, neighbor_idx = [], [], []
+# Horizon sampling configuration
+_HORIZON_BEARINGS      = [0, 45, 90, 135, 180, 225, 270, 315]  # N NE E SE S SW W NW
+_HORIZON_NEAR_DIST     = 200    # metres — used for ALL spots (prominence + near horizon)
+_HORIZON_FAR_DISTS     = [500, 1000]  # metres — only for top candidates (phase 2)
+_HORIZON_PHASE2_FRAC   = 0.5   # fraction of spots that get full far-distance sampling
+
+
+def _build_point_list(spots, distances):
+    """
+    Builds a flat list of {lat, lon} points for a given set of spots and distances.
+    Returns (all_pts, spot_idx, nb_idx) where:
+      spot_idx[i]    = index of spot centre i in all_pts
+      nb_idx[i][d][b] = index in all_pts for spot i, distance d, bearing b
+    """
+    all_pts  = []
+    spot_idx = []
+    nb_idx   = []   # [spot][dist_idx][bearing_idx]
+
     for spot in spots:
         spot_idx.append(len(all_pts))
         all_pts.append({"lat": spot["lat"], "lon": spot["lon"]})
-        nb = []
-        for bearing in [0, 90, 180, 270]:
-            nlat, nlon = offset_point(spot["lat"], spot["lon"], bearing, dist_m)
-            nb.append(len(all_pts))
-            all_pts.append({"lat": nlat, "lon": nlon})
-        neighbor_idx.append(nb)
+        dist_groups = []
+        for dist in distances:
+            bearings = []
+            for bearing in _HORIZON_BEARINGS:
+                nlat, nlon = offset_point(spot["lat"], spot["lon"], bearing, dist)
+                bearings.append(len(all_pts))
+                all_pts.append({"lat": nlat, "lon": nlon})
+            dist_groups.append(bearings)
+        nb_idx.append(dist_groups)
 
-    total = len(all_pts)
-    n_spots = len(spots)
-    print(f"\n-- Elevation lookup ({n_spots} spots + {total - n_spots} neighbour points = {total} total) --")
-    elevations = get_elevations(all_pts)
+    return all_pts, spot_idx, nb_idx
 
+
+def _fetch_elevations_with_neighbors(spots, full_horizon=False):
+    """
+    Elevation + prominence sampling. Optionally adds full horizon scoring.
+
+    Always (fast path):
+      Phase 1 — ALL spots × 8 directions × 200m
+        → centre elevations, prominence, near-horizon proxy
+
+    With full_horizon=True (slower, more accurate):
+      Phase 2 — Top 50% × 8 directions × 500m + 1000m
+        → Full line-of-sight horizon score for top candidates.
+        Note: adds significant API calls on first run (~150 extra batches
+        for a large park). Results are cached so subsequent runs are instant.
+
+    Cache: both phases use the shared elevation cache — subsequent runs
+    for the same park require zero API calls regardless of full_horizon.
+    """
+    # ── Phase 1: all spots + near ring ───────────────────────────────────────
+    phase1_pts, s_idx1, nb_idx1 = _build_point_list(spots, [_HORIZON_NEAR_DIST])
+    n_pts1 = len(phase1_pts)
+    print(f"\n-- Elevation phase 1: {len(spots)} spots × 8 directions × 200m = {n_pts1} points --")
+    elev1 = get_elevations(phase1_pts)
+
+    # Assign centre elevations and near-ring prominence
     for i, spot in enumerate(spots):
-        spot["elevation_m"] = elevations[spot_idx[i]]
-        nb_elevs = [elevations[j] for j in neighbor_idx[i] if elevations[j] is not None]
-        spot["neighbors_elev"] = nb_elevs
-        if spot["elevation_m"] is not None and nb_elevs:
-            spot["prominence_m"] = round(spot["elevation_m"] - sum(nb_elevs) / len(nb_elevs), 1)
+        spot["elevation_m"] = elev1[s_idx1[i]]
+        near_elevs = [elev1[nb_idx1[i][0][b]] for b in range(len(_HORIZON_BEARINGS))
+                      if elev1[nb_idx1[i][0][b]] is not None]
+        se = spot["elevation_m"]
+        spot["prominence_m"] = round(se - sum(near_elevs) / len(near_elevs), 1)                                if se is not None and near_elevs else None
+        # Near-only horizon (will be refined for top candidates in phase 2)
+        if se is not None and near_elevs:
+            open_near = sum(1 for e in [elev1[nb_idx1[i][0][b]]
+                            for b in range(len(_HORIZON_BEARINGS))]
+                            if e is None or se >= e)
+            spot["_near_open"] = open_near
         else:
-            spot["prominence_m"] = None
+            spot["_near_open"] = 0
+
+    # ── Select top candidates for phase 2 ────────────────────────────────────
+    valid = [s for s in spots if s["elevation_m"] is not None]
+    valid.sort(key=lambda s: s.get("prominence_m") or -999, reverse=True)
+    cutoff       = max(1, int(len(valid) * _HORIZON_PHASE2_FRAC))
+    top_spots    = valid[:cutoff]
+    bottom_spots = valid[cutoff:]
+
+    # Assign near-only horizon to bottom spots (they won't get phase 2)
+    # When full_horizon=False, ALL spots get near-only horizon score
+    for spot in (bottom_spots if full_horizon else valid):
+        spot["horizon_open_pct"] = round(spot["_near_open"] / len(_HORIZON_BEARINGS) * 100)
+
+    # ── Phase 2: top candidates + far rings (only when --horizon is set) ───────
+    if full_horizon and top_spots:
+        phase2_pts, s_idx2, nb_idx2 = _build_point_list(top_spots, _HORIZON_FAR_DISTS)
+        n_pts2 = len(phase2_pts)
+        print(f"-- Elevation phase 2: {len(top_spots)} top spots × 8 directions × 500m+1000m"
+              f" = {n_pts2} points --")
+        elev2 = get_elevations(phase2_pts)
+
+        for i, spot in enumerate(top_spots):
+            se = spot["elevation_m"]
+            if se is None:
+                spot["horizon_open_pct"] = None
+                continue
+            open_dirs = 0
+            for b in range(len(_HORIZON_BEARINGS)):
+                # Near point (from phase 1)
+                near_e = elev1[nb_idx1[spots.index(spot)][0][b]]
+                # Far points (from phase 2)
+                far_es = [elev2[nb_idx2[i][d][b]] for d in range(len(_HORIZON_FAR_DISTS))]
+                all_e  = [e for e in [near_e] + far_es if e is not None]
+                if not all_e or all(se >= e for e in all_e):
+                    open_dirs += 1
+            spot["horizon_open_pct"] = round(open_dirs / len(_HORIZON_BEARINGS) * 100)
+
+    # Clean up temp key
+    for spot in spots:
+        spot.pop("_near_open", None)
+
+    if full_horizon and top_spots:
+        total_api = n_pts1 + n_pts2
+        full_cost = len(spots) * (1 + len(_HORIZON_FAR_DISTS)) * len(_HORIZON_BEARINGS) + len(spots)
+        print(f"  Progressive sampling: {total_api} points queried "
+              f"(vs {full_cost} for full sampling). Cache handles repeats.")
+    else:
+        print(f"  Fast path: {n_pts1} points queried (near-horizon only). "
+              f"Use --horizon for full line-of-sight scoring.")
+
     return spots
 
 
@@ -744,15 +840,28 @@ def _score_ruhe(spot, road_major, road_minor, hotspots):
     return max(0, min(25, rs - penalty)), d_road
 
 
-def _score_sicht(spot):
-    prom = spot.get("prominence_m") or 0
-    if prom >= 20:   s = 20
-    elif prom >= 10: s = 15
-    elif prom >= 5:  s = 10
-    elif prom >= 0:  s = 5
-    else:            s = 2
+def _score_horizon(spot):
+    """
+    20 points — real horizon score based on line-of-sight elevation sampling.
+
+    horizon_open_pct: percentage of 8 compass directions with clear sight
+    (i.e. spot is higher than all sampled points at 200m, 500m, 1000m).
+
+    A viewpoint tag adds +3 pts (OSM mappers explicitly marked it as open).
+    """
+    pct = spot.get("horizon_open_pct")
+    if pct is None:
+        s = 5   # no data — conservative default
+    elif pct >= 87:  s = 20   # 7–8 of 8 directions open
+    elif pct >= 75:  s = 17   # 6 of 8
+    elif pct >= 62:  s = 14   # 5 of 8
+    elif pct >= 50:  s = 10   # 4 of 8
+    elif pct >= 37:  s = 6    # 3 of 8
+    elif pct >= 25:  s = 3    # 2 of 8
+    else:            s = 1    # mostly blocked
+
     if "viewpoint" in spot.get("amenities", []):
-        s = min(20, s + 5)
+        s = min(20, s + 3)
     return s
 
 
@@ -787,6 +896,12 @@ def _build_reason(spot):
     if am:
         parts.append(am)
 
+    hz = spot.get("horizon_open_pct")
+    if hz is not None:
+        if hz >= 75:   parts.append(f"open horizon ({hz}%)")
+        elif hz >= 50: parts.append(f"partial horizon ({hz}%)")
+        else:          parts.append(f"limited horizon ({hz}%)")
+
     d_road = spot.get("nearest_road_m")
     if d_road:
         if d_road >= 800:   parts.append(f"very quiet ({d_road}m from road)")
@@ -799,7 +914,7 @@ def _build_reason(spot):
     return " · ".join(parts)
 
 
-def find_by_score(geojson_path, top=10, grid=150, refresh=False):
+def find_by_score(geojson_path, top=10, grid=150, refresh=False, horizon=False):
     """
     Python API: Scores spots by prominence, quietness, view, comfort and accessibility.
 
@@ -808,6 +923,10 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
         top:     Number of spots to return
         grid:    Grid cell size in metres for clustering
         refresh: Ignore cache and re-query Overpass
+        horizon: Enable full horizon sampling (8 directions × 3 distances).
+                 Significantly improves open-view scoring but adds several
+                 minutes of elevation API calls on first run. Results are
+                 cached so subsequent runs are instant.
 
     Returns:
         Dict with "mode", "park", "spots"
@@ -839,8 +958,8 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
     if not spots:
         return {"mode": "score", "park": park_props, "_attribution": OSM_ATTRIBUTION, "spots": []}
 
-    # Elevation + prominence
-    spots = _fetch_elevations_with_neighbors(spots)
+    # Elevation + prominence (+ optional horizon sampling)
+    spots = _fetch_elevations_with_neighbors(spots, full_horizon=horizon)
 
     # Scoring
     print("\n-- Scoring --------------------------------------------------------------")
@@ -852,15 +971,15 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
         s_ruhe, d_road      = _score_ruhe(spot, cats.get("road_major", []),
                                            cats.get("road_minor", []),
                                            cats.get("tourist_hotspot", []))
-        s_sicht             = _score_sicht(spot)
+        s_horizon           = _score_horizon(spot)
         s_comf              = _score_comfort(spot.get("amenities", []))
         s_acc, d_park       = _score_access(spot, cats.get("parking", []))
-        spot["score"]             = round(s_prom + s_ruhe + s_sicht + s_comf + s_acc, 1)
+        spot["score"]             = round(s_prom + s_ruhe + s_horizon + s_comf + s_acc, 1)
         spot["nearest_road_m"]    = round(d_road) if d_road < 99999 else None
         spot["nearest_parking_m"] = d_park
         spot["breakdown"]         = {
-            "prominenz":   s_prom, "ruhe":       s_ruhe,
-            "freie_sicht": s_sicht, "komfort":   s_comf, "erreichbar": s_acc,
+            "prominenz":   s_prom,    "ruhe":      s_ruhe,
+            "horizon":     s_horizon, "komfort":   s_comf, "erreichbar": s_acc,
         }
 
     sorted_spots = sorted(
@@ -883,6 +1002,7 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
             "amenities":         s["amenities"],
             "nearest_road_m":    s.get("nearest_road_m"),
             "nearest_parking_m": s.get("nearest_parking_m"),
+            "horizon_open_pct":  s.get("horizon_open_pct"),
             "reason":            _build_reason(s),
             "osm_url":           _osm_url(anc),
             "gmaps_url":         _gmaps_url(s["lat"], s["lon"]),
@@ -927,17 +1047,19 @@ def _print_score_results(result):
     spots = result["spots"]
     print(f"\n{'=' * 82}")
     print(f"  POTA SCORE RANKING — Top {len(spots)}")
-    print(f"  Prominence 30 · Quietness 25 · Open View 20 · Comfort 15 · Access 10")
+    print(f"  Prominence 30 · Quietness 25 · Horizon 20 · Comfort 15 · Access 10")
     print(f"{'=' * 82}")
-    print(f"  {'#':>3}  {'Score':>5}  {'Prom':>5}  {'Quiet':>5}  {'View':>5}  {'Comf':>5}  {'Acc':>5}  Reason")
+    print(f"  {'#':>3}  {'Score':>5}  {'Prom':>5}  {'Quiet':>5}  {'Horiz':>5}  {'Comf':>5}  {'Acc':>5}  Reason")
     print(f"  {'-'*3}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*36}")
     for s in spots:
         bd  = s.get("breakdown", {})
         sc  = f"{s['score']:.0f}" if s["score"] else "n/a"
+        hz  = s.get("horizon_open_pct")
+        hz_s = f"{hz}%" if hz is not None else "?"
         print(f"  {s['rank']:>3}  {sc:>5}  "
               f"{str(bd.get('prominenz','?')):>5}  {str(bd.get('ruhe','?')):>5}  "
-              f"{str(bd.get('freie_sicht','?')):>5}  {str(bd.get('komfort','?')):>5}  "
-              f"{str(bd.get('erreichbar','?')):>5}  {s['reason']}")
+              f"{str(bd.get('horizon','?')):>5}  {str(bd.get('komfort','?')):>5}  "
+              f"{str(bd.get('erreichbar','?')):>5}  {s['reason']} [{hz_s} open]")
     print(f"\n  {'#':>3}  {'Score':>5}  {'OSM':<44}  Google Maps")
     print(f"  {'-'*3}  {'-'*5}  {'-'*44}  {'-'*42}")
     for s in spots:
@@ -965,45 +1087,202 @@ def _write_html_elevation(filename, result):
                      rows, subtitle="Ranked by elevation")
 
 
+def _fetch_leaflet_assets():
+    """
+    Downloads Leaflet CSS + JS from CDN and returns (css, js) as strings.
+    Falls back to CDN links if download fails (requires internet when viewing).
+    """
+    try:
+        css_r = requests.get("https://unpkg.com/leaflet@1.9.4/dist/leaflet.css", timeout=10)
+        js_r  = requests.get("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",  timeout=10)
+        css_r.raise_for_status()
+        js_r.raise_for_status()
+        print("  Leaflet assets fetched and inlined — HTML works offline.")
+        return css_r.text, js_r.text
+    except Exception as e:
+        print(f"  ⚠  Could not fetch Leaflet ({e}) — falling back to CDN links.")
+        return None, None
+
+
 def _write_html_score(filename, result):
+    """Generates a full HTML report with Leaflet map + ranked table."""
     park_name = result["park"].get("name", "POTA Park")
+    spots     = result["spots"]
+    if not spots:
+        return
+
+    # Centre map on average of top spots
+    clat = sum(s["lat"] for s in spots) / len(spots)
+    clon = sum(s["lon"] for s in spots) / len(spots)
+
+    # Build JS marker array
+    markers_js = []
+    for s in spots:
+        sc    = f"{s['score']:.0f}" if s["score"] else "?"
+        bd    = s.get("breakdown", {})
+        hz    = s.get("horizon_open_pct")
+        hz_s  = f"{hz}%" if hz is not None else "?"
+        col   = "#4caf78" if (s["score"] or 0) >= 70 else "#e8a030" if (s["score"] or 0) >= 50 else "#c06040"
+        reason_esc = s["reason"].replace("'", "\'").replace('"', '\"')
+        # Use double quotes for HTML attributes so they don't break the JS string
+        popup = (
+            f'<b>#{s["rank"]} — Score {sc}</b><br>'
+            f'{reason_esc}<br>'
+            f'Horizon: {hz_s} open<br>'
+            f'Prom {bd.get("prominenz","?")} · '
+            f'Quiet {bd.get("ruhe","?")} · '
+            f'Horiz {bd.get("horizon","?")} · '
+            f'Comf {bd.get("komfort","?")} · '
+            f'Acc {bd.get("erreichbar","?")}<br>'
+            f'<a href="{s["osm_url"]}" target="_blank">OSM</a> '
+            f'<a href="{s["gmaps_url"]}" target="_blank">Google Maps</a>'
+        )
+        # Escape any remaining single quotes in the popup for the JS string
+        popup_safe = popup.replace("'", "&#39;")
+        markers_js.append(
+            f"  addMarker({s['lat']}, {s['lon']}, '{sc}', '{col}', '{popup_safe}');"
+        )
+    markers_js_str = "\n".join(markers_js)
+
+    # Build table rows
     rows = ""
-    for s in result["spots"]:
+    for s in spots:
         sc  = f"{s['score']:.0f}" if s["score"] else "n/a"
         col = "#4caf78" if (s["score"] or 0) >= 70 else "#e8a030" if (s["score"] or 0) >= 50 else "#c06040"
         bd  = s.get("breakdown", {})
+        hz  = s.get("horizon_open_pct")
+        hz_s = f"{hz}%" if hz is not None else "?"
 
         def bar(val, mx, clr):
             pct = round((val or 0) / mx * 100)
             return (f"<div style='display:inline-block;background:#1a2420;border-radius:2px;"
-                    f"height:4px;width:60px;vertical-align:middle'>"
+                    f"height:4px;width:52px;vertical-align:middle'>"
                     f"<div style='background:{clr};width:{pct}%;height:100%;border-radius:2px'>"
                     f"</div></div>")
 
         bars = "".join(
-            f"<div style='font-size:10px;color:#5a7060'>{lbl} {v} {bar(v,mx,clr)}</div>"
+            f"<div style='font-size:10px;color:#5a7060'>{lbl}&nbsp;{v}&nbsp;{bar(v,mx,clr)}</div>"
             for lbl, v, mx, clr in [
-                ("Prominence",  bd.get("prominenz",   0), 30, "#e8a030"),
-                ("Quietness",   bd.get("ruhe",        0), 25, "#4caf78"),
-                ("Open View",   bd.get("freie_sicht", 0), 20, "#60aacc"),
-                ("Comfort",     bd.get("komfort",     0), 15, "#cc80cc"),
-                ("Access",      bd.get("erreichbar",  0), 10, "#c06040"),
+                ("Prom",   bd.get("prominenz",  0), 30, "#e8a030"),
+                ("Quiet",  bd.get("ruhe",       0), 25, "#4caf78"),
+                ("Horiz",  bd.get("horizon",    0), 20, "#60aacc"),
+                ("Comf",   bd.get("komfort",    0), 15, "#cc80cc"),
+                ("Acc",    bd.get("erreichbar", 0), 10, "#c06040"),
             ]
         )
-        rows += (f"<tr><td>{s['rank']}</td>"
-                 f"<td style='font-size:22px;font-weight:700;color:{col}'>{sc}</td>"
-                 f"<td>{html_lib.escape(s['reason'])}<br>"
-                 f"<span style='color:#5a7060;font-size:11px'>{s['lat']:.5f}, {s['lon']:.5f}</span></td>"
-                 f"<td>{bars}</td>"
-                 f"<td><a href='{s['osm_url']}' target='_blank'>OSM</a> "
-                 f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>")
+        rows += (
+            f"<tr onclick='flyTo({s["lat"]},{s["lon"]})'>"
+            f"<td>{s['rank']}</td>"
+            f"<td style='font-size:20px;font-weight:700;color:{col};text-align:center'>{sc}</td>"
+            f"<td><span style='font-size:11px;color:#5a7060'>{hz_s} open horizon</span><br>"
+            f"{html_lib.escape(s['reason'])}<br>"
+            f"<span style='color:#5a7060;font-size:11px'>{s['lat']:.5f}, {s['lon']:.5f}</span></td>"
+            f"<td style='min-width:130px'>{bars}</td>"
+            f"<td style='white-space:nowrap'>"
+            f"<a href='{s['osm_url']}' target='_blank'>OSM</a>"
+            f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>"
+        )
 
-    _write_html_file(filename, park_name, "POTA Score Ranking",
-                     "<tr><th>#</th><th>Score</th><th>Spot</th><th>Breakdown</th><th>Links</th></tr>",
-                     rows, subtitle="Prominence 30 · Quietness 25 · Open View 20 · Comfort 15 · Access 10")
+    leaflet_css, leaflet_js = _fetch_leaflet_assets()
+    if leaflet_css:
+        leaflet_css_tag = "<style>" + leaflet_css + "</style>"
+        leaflet_js_tag  = "<script>" + leaflet_js + "</script>"
+    else:
+        leaflet_css_tag = '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>'
+        leaflet_js_tag  = '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>POTA Score — {html_lib.escape(park_name)}</title>
+{leaflet_css_tag}
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0d1410;color:#c8d8cc;font-family:Inter,sans-serif;display:flex;flex-direction:column;min-height:100vh}}
+  header{{padding:20px 28px 12px;border-bottom:1px solid #1a2420}}
+  h1{{font-size:20px;color:#e8a030;font-weight:600}}
+  .sub{{color:#5a7060;font-size:11px;font-family:monospace;margin-top:4px}}
+  #map{{height:420px;width:100%;border-bottom:1px solid #1a2420}}
+  .content{{display:flex;flex:1;overflow:hidden}}
+  .table-wrap{{flex:1;overflow-y:auto;padding:0}}
+  table{{width:100%;border-collapse:collapse;font-size:12px}}
+  th{{text-align:left;padding:8px 12px;color:#5a7060;font-weight:400;font-size:10px;
+      letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid #2a3d35;
+      position:sticky;top:0;background:#0d1410;z-index:1}}
+  td{{padding:10px 12px;border-bottom:1px solid #141c18;vertical-align:middle;cursor:pointer}}
+  tr:hover td{{background:#141c18}}
+  a{{color:#e8a030;text-decoration:none;margin-right:8px;font-size:11px}}
+  a:nth-child(2){{color:#4caf78}}
+  footer{{padding:12px 28px;font-size:10px;color:#2a4030;font-family:monospace;border-top:1px solid #141c18}}
+  footer a{{color:#2a4030;font-size:10px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🏕 POTA Score — {html_lib.escape(park_name)}</h1>
+  <div class="sub">Prominence 30 · Quietness 25 · Horizon 20 · Comfort 15 · Access 10
+    &nbsp;·&nbsp; Click a row to fly to the spot on the map</div>
+</header>
+
+<div id="map"></div>
+
+<div class="content">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Score</th><th>Spot</th><th>Breakdown</th><th>Links</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<footer>
+  © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap contributors</a>,
+  <a href="https://opendatacommons.org/licenses/odbl/" target="_blank">ODbL 1.0</a>
+  &nbsp;·&nbsp; Elevation: SRTM, public domain (NASA/USGS)
+  &nbsp;·&nbsp; Park boundaries: <a href="https://pota-map.info" target="_blank">pota-map.info</a>
+  &nbsp;·&nbsp; Map: <a href="https://leafletjs.com" target="_blank">Leaflet</a>
+</footer>
+
+{leaflet_js_tag}
+<script>
+var map = L.map('map').setView([{clat}, {clon}], 13);
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 18
+}}).addTo(map);
+
+function addMarker(lat, lon, score, color, popup) {{
+  var icon = L.divIcon({{
+    className: '',
+    html: '<div style="background:' + color + ';color:#0d1410;font-weight:700;font-size:11px;'
+        + 'width:28px;height:28px;border-radius:50%;display:flex;align-items:center;'
+        + 'justify-content:center;border:2px solid #0d1410;box-shadow:0 2px 6px rgba(0,0,0,.5)">'
+        + score + '</div>',
+    iconSize: [28, 28],
+    iconAnchor: [14, 14]
+  }});
+  L.marker([lat, lon], {{icon: icon}})
+    .addTo(map)
+    .bindPopup(popup, {{maxWidth: 280}});
+}}
+
+function flyTo(lat, lon) {{
+  map.flyTo([lat, lon], 15, {{duration: 1}});
+}}
+
+{markers_js_str}
+</script>
+</body>
+</html>"""
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
 
 def _write_html_file(filename, park_name, title, thead, tbody, subtitle=""):
+    """Simple HTML table output (used by elevation mode)."""
     content = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -1054,6 +1333,7 @@ def main():
             "  python3 pota_finder.py elevation DE-0042.geojson -t 10 -b 20\n"
             "  python3 pota_finder.py score     DE-0042.geojson\n"
             "  python3 pota_finder.py score     DE-0042.geojson --top 15 --html\n"
+            "  python3 pota_finder.py score     DE-0042.geojson --horizon          # full horizon (slower first run, cached after)\n"
         ),
     )
     sub = parser.add_subparsers(dest="mode", required=True, metavar="mode")
@@ -1098,6 +1378,10 @@ def main():
                     help="Grid cell size in metres for clustering (default: 150)")
     ps.add_argument("--refresh", action="store_true",
                     help="Ignore cache and re-query Overpass")
+    ps.add_argument("--horizon", action="store_true",
+                    help="Enable full horizon sampling (8 dirs × 3 distances). "
+                         "More accurate open-view scoring but adds several minutes "
+                         "on first run. Cached — subsequent runs are instant.")
     ps.add_argument("--html",    action="store_true",
                     help="Generate HTML report")
     ps.add_argument("-o", "--output", default=None, metavar="FILE",
@@ -1131,7 +1415,8 @@ def main():
 
     elif args.mode == "score":
         result = find_by_score(args.geojson,
-                               top=args.top, grid=args.grid, refresh=args.refresh)
+                               top=args.top, grid=args.grid,
+                               refresh=args.refresh, horizon=args.horizon)
         _print_score_results(result)
 
         out = args.output or f"score_{base}.json"
