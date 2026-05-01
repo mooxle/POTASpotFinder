@@ -213,6 +213,16 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
 | [Open-Topo-Data](https://www.opentopodata.org) | Elevation data — primary (SRTM30m) |
 | [Open-Elevation](https://api.open-elevation.com) | Elevation data — fallback (SRTM) |
 
+## ⚠️ API Usage
+
+This tool relies on free public APIs.
+
+For heavy usage:
+- run your own Overpass instance
+- use a paid elevation API
+
+Default endpoints are provided for testing only.
+
 ---
 
 ## 📝 Notes
@@ -224,12 +234,14 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
 
 ---
 
-## 🤖 Transparency
-
-The idea and concept behind this tool were conceived by **mooxle (DA6MAX)**. The code was generated with the assistance of [Claude](https://claude.ai) by Anthropic.
-
----
 
 ## 73 de the field
 
 *Built for POTA activators who want to make the most of their time on the air — and enjoy the view while doing it.*
+
+---
+
+## 🤖 Transparency
+
+The idea and concept behind this tool were conceived by **mooxle (DA6MAX)**. The code was generated with the assistance of [Claude](https://claude.ai) by Anthropic.
+
