@@ -155,6 +155,8 @@ python3 pota_finder.py score DE-0042.geojson --top 15 --html
 # → opens score_DE-0042.html in your browser
 ```
 
+![POTA Score interactive map — Hoher Vogelsberg](PotaScore_htmlScreenshot.png)
+
 ---
 
 ## 🐍 Python API
