@@ -126,13 +126,13 @@ python3 pota_finder.py score DE-0042.geojson --grid 80
 ```
 ================================================================================
   POTA SCORE RANKING — Top 10
-  Prominenz 30 · Ruhe 25 · Freie Sicht 20 · Komfort 15 · Erreichbar 10
+  Prominence 30 · Quietness 25 · Open View 20 · Comfort 15 · Access 10
 ================================================================================
-  #  Score  Prom  Ruhe  Sicht  Komf  Weg  Begruendung
+  #  Score  Prom  Quiet  View  Comf  Acc  Reason
   ---  -----  -----  -----  -----  -----  -----  ----------------------------------------
-    1     81     22     20     15      8    10  612m +12m · Bank · ruhig (520m) · Parkplatz 380m
-    2     74     14     20     10     15    10  783m +8m · Picknicktisch + Bank · Parkplatz 340m
-    3     68      7     25     10      8    10  540m +4m · Bank · sehr ruhig (920m) · Parkplatz 680m
+    1     81     22     20     15      8    10  612m +12m · bench · quiet (520m from road) · parking 380m
+    2     74     14     20     10     15    10  783m +8m · picnic table + bench · parking 340m
+    3     68      7     25     10      8    10  540m +4m · bench · very quiet (920m from road) · parking 680m
 ```
 
 Spot #1 scores higher than the higher-elevation spot #2 — it sits on a ridge with a better view and is further from roads, exactly what you want for a POTA activation.
@@ -165,6 +165,10 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
 {
   "mode": "elevation | score",
   "park": { "name": "Hoher Vogelsberg Nature Park", "id": "DE-0042" },
+  "_attribution": {
+    "osm": "© OpenStreetMap contributors, ODbL 1.0 — https://www.openstreetmap.org/copyright",
+    "elevation": "SRTM elevation data, public domain — NASA/USGS"
+  },
   "spots": [
     {
       "rank":         1,
@@ -176,7 +180,7 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
         "prominenz": 22, "ruhe": 20, "freie_sicht": 15, "komfort": 8, "erreichbar": 10
       },
       "amenities":    ["picnic_table", "bench"],
-      "reason":       "783m +8m · Picknicktisch · ruhig (520m) · Parkplatz 340m",
+      "reason":       "783m +8m · picnic table · quiet (520m from road) · parking 340m",
       "osm_url":      "https://www.openstreetmap.org/node/123456789",
       "gmaps_url":    "https://www.google.com/maps?q=50.517,9.238"
     }
@@ -191,7 +195,7 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
 ### elevation mode
 1. Queries Overpass API for each requested category separately
 2. Filters results to park polygon via ray-casting
-3. Fetches elevation from Open-Topo-Data (SRTM30m) with Open-Elevation fallback
+3. Fetches elevation from Open-Topo-Data (SRTM30m) with Open-Elevation fallback — rate-limited, results cached to `.cache_elevation.json`
 4. Sorts by elevation, outputs table + links
 
 ### score mode
@@ -200,18 +204,26 @@ Both modes return the same JSON structure — `score` and `breakdown` are `null`
 3. **Grid clustering** — groups objects into 150m cells, one representative spot per cell
 4. **Elevation + prominence** — fetches height for each spot centre + 4 neighbour points (N/E/S/W, 300m) to compute local prominence
 5. **Scoring** — all calculations local, no extra API calls
-6. **Cache** — Overpass result saved as `.cache_pota_<park>.json`; subsequent runs skip the Overpass call entirely
+6. **Two-layer cache** — Overpass result saved as `.cache_pota_<park>.json`; elevation results saved to `.cache_elevation.json`; subsequent runs on the same park require zero API calls
 
 ---
 
-## 📡 Data Sources
+## 📡 Data Sources & Attribution
 
-| Source | What for |
-|---|---|
-| [pota-map.info](https://pota-map.info) | Park boundary GeoJSON files |
-| [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | Amenities, roads, parking, tourist infrastructure |
-| [Open-Topo-Data](https://www.opentopodata.org) | Elevation data — primary (SRTM30m) |
-| [Open-Elevation](https://api.open-elevation.com) | Elevation data — fallback (SRTM) |
+| Source | What for | License |
+|---|---|---|
+| [pota-map.info](https://pota-map.info) | Park boundary GeoJSON files | See pota-map.info |
+| [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | Amenities, roads, parking, tourist infrastructure | [ODbL 1.0](https://opendatacommons.org/licenses/odbl/) |
+| [Open-Topo-Data](https://www.opentopodata.org) | Elevation data — primary (SRTM30m) | Public domain (NASA SRTM) |
+| [Open-Elevation](https://api.open-elevation.com) | Elevation data — fallback (SRTM) | Public domain (NASA SRTM) |
+
+### Required Attribution
+
+This tool uses **OpenStreetMap** data, which is licensed under the [Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/). Any use or display of results from this tool must include the following attribution:
+
+> © OpenStreetMap contributors — [openstreetmap.org/copyright](https://www.openstreetmap.org/copyright)
+
+This applies to the HTML reports, any maps or visualisations built from the JSON output, and any derivative projects that embed this tool.
 
 ## ⚠️ API Usage
 
@@ -244,4 +256,3 @@ Default endpoints are provided for testing only.
 ## 🤖 Transparency
 
 The idea and concept behind this tool were conceived by **mooxle (DA6MAX)**. The code was generated with the assistance of [Claude](https://claude.ai) by Anthropic.
-
