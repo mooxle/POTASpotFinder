@@ -1,10 +1,10 @@
 """
 pota_finder.py
 ==============
-Findet die besten POTA-Aktivierungsspots innerhalb eines GeoJSON-Parks.
-Zwei Modi — beide liefern dasselbe JSON-Format zurueck.
+Finds the best POTA activation spots within a GeoJSON park boundary.
+Two modes — both return the same JSON format.
 
-VERWENDUNG (CLI):
+USAGE (CLI):
   python3 pota_finder.py elevation DE-0042.geojson
   python3 pota_finder.py elevation DE-0042.geojson -t 10 -b 20 -l 5
   python3 pota_finder.py score     DE-0042.geojson
@@ -12,7 +12,7 @@ VERWENDUNG (CLI):
   python3 pota_finder.py elevation --help
   python3 pota_finder.py score     --help
 
-VERWENDUNG (Python API):
+USAGE (Python API):
   from pota_finder import find_by_elevation, find_by_score
 
   result = find_by_elevation("DE-0042.geojson", tables=10, benches=20)
@@ -21,7 +21,7 @@ VERWENDUNG (Python API):
   for spot in result["spots"]:
       print(spot["rank"], spot["elevation_m"], spot["score"], spot["gmaps_url"])
 
-OUTPUT-FORMAT (beide Modi):
+OUTPUT FORMAT (both modes):
   {
     "mode":  "elevation" | "score",
     "park":  { ...GeoJSON properties... },
@@ -31,9 +31,9 @@ OUTPUT-FORMAT (beide Modi):
         "lat":          50.517,
         "lon":          9.238,
         "elevation_m":  783,
-        "score":        null | 81.0,       # nur im score-Modus
-        "breakdown":    {},                # nur im score-Modus
-        "reason":       "783m · Picknicktisch · ruhig (520m) · Parkplatz 380m",
+        "score":        null | 81.0,       # score mode only
+        "breakdown":    {},                # score mode only
+        "reason":       "783m · picnic table · quiet (520m) · parking 380m",
         "amenities":    ["picnic_table", "bench"],
         "osm_url":      "https://www.openstreetmap.org/node/123",
         "gmaps_url":    "https://www.google.com/maps?q=50.517,9.238"
@@ -41,7 +41,7 @@ OUTPUT-FORMAT (beide Modi):
     ]
   }
 
-Benoetigt: pip install requests
+Requires: pip install requests
 """
 
 import argparse
@@ -55,11 +55,11 @@ import requests
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SHARED — GEOMETRIE
+# SHARED — GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def point_in_polygon(lat, lon, polygon):
-    """Ray-Casting-Algorithmus: True wenn (lat, lon) im Polygon liegt."""
+    """Ray-casting algorithm: returns True if (lat, lon) is inside the polygon."""
     x, y = lon, lat
     inside = False
     n = len(polygon)
@@ -74,7 +74,7 @@ def point_in_polygon(lat, lon, polygon):
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
-    """Distanz in Metern zwischen zwei WGS84-Koordinaten."""
+    """Distance in metres between two WGS84 coordinates."""
     R = 6_371_000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -84,7 +84,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 
 def offset_point(lat, lon, bearing_deg, dist_m):
-    """Verschiebt einen Punkt um dist_m Meter in Richtung bearing_deg."""
+    """Offsets a point by dist_m metres in the given bearing direction."""
     R = 6_371_000
     d = dist_m / R
     b = math.radians(bearing_deg)
@@ -97,7 +97,7 @@ def offset_point(lat, lon, bearing_deg, dist_m):
 
 
 def load_geojson(path):
-    """Laedt GeoJSON, gibt (polygon, park_props, bbox) zurueck."""
+    """Loads GeoJSON file, returns (polygon, park_props, bbox)."""
     with open(path, "r", encoding="utf-8") as f:
         feature = json.load(f)
     if feature.get("type") == "FeatureCollection":
@@ -127,7 +127,7 @@ HEADERS = {
     "User-Agent":   "POTA-finder/3.0",
 }
 
-# Overpass-Query fuer den elevation-Modus (einzelne Kategorie)
+# Overpass query for elevation mode (single category)
 def _overpass_query_single(bbox, key, value):
     s, w, n, e = bbox
     return (
@@ -137,7 +137,7 @@ def _overpass_query_single(bbox, key, value):
         f");\nout center tags;\n"
     )
 
-# Overpass-Query fuer den score-Modus (alle Kategorien auf einmal)
+# Overpass query for score mode (all categories in one call)
 _SCORE_QUERY = """
 [out:json][timeout:120];
 (
@@ -162,7 +162,7 @@ out center tags;
 
 
 def _run_overpass(query):
-    """Schickt eine Overpass-Abfrage, versucht alle Mirror."""
+    """Sends an Overpass query, tries all mirror servers."""
     for endpoint in OVERPASS_ENDPOINTS:
         print(f"  → {endpoint.split('/')[2]} ...")
         try:
@@ -177,16 +177,16 @@ def _run_overpass(query):
                                     timeout=150)
             resp.raise_for_status()
             els = resp.json().get("elements", [])
-            print(f"    OK – {len(els)} Elemente")
+            print(f"    OK – {len(els)} elements")
             return els
         except Exception as ex:
-            print(f"    Fehler: {ex}")
+            print(f"    Error: {ex}")
             time.sleep(2)
-    raise RuntimeError("Alle Overpass-Endpunkte fehlgeschlagen.")
+    raise RuntimeError("All Overpass endpoints failed.")
 
 
 def _el_to_point(el):
-    """Extrahiert lat/lon aus einem Overpass-Element."""
+    """Extracts lat/lon from an Overpass element."""
     if el["type"] == "node":
         return el["lat"], el["lon"]
     if el["type"] == "way" and "center" in el:
@@ -233,7 +233,7 @@ def _fetch_elevation_batch(provider, locations):
         except Exception as e:
             if attempt < RETRY_COUNT:
                 wait = 2 ** attempt
-                print(f"    Versuch {attempt} fehlgeschlagen ({e}) – warte {wait}s ...")
+                print(f"    Attempt {attempt} failed ({e}) — retrying in {wait}s ...")
                 time.sleep(wait)
             else:
                 raise
@@ -241,8 +241,8 @@ def _fetch_elevation_batch(provider, locations):
 
 def get_elevations(points):
     """
-    Holt Hoehendata fuer eine Liste von {lat, lon}-Dicts.
-    Versucht Provider der Reihe nach, faellt bei Fehler auf naechsten zurueck.
+    Fetches elevation data for a list of {lat, lon} dicts.
+    Tries providers in order, falls back to the next on failure.
     """
     all_elev  = [None] * len(points)
     remaining = list(range(len(points)))
@@ -258,7 +258,7 @@ def get_elevations(points):
         for b_num, idx_batch in enumerate(batches, 1):
             locs = [{"latitude": points[i]["lat"], "longitude": points[i]["lon"]}
                     for i in idx_batch]
-            print(f"  → Batch {b_num}/{len(batches)} ({len(idx_batch)} Punkte) ...",
+            print(f"  → Batch {b_num}/{len(batches)} ({len(idx_batch)} points) ...",
                   end=" ", flush=True)
             try:
                 elevs = _fetch_elevation_batch(provider, locs)
@@ -266,19 +266,19 @@ def get_elevations(points):
                     all_elev[idx] = elev
                 print("OK")
             except Exception as e:
-                print(f"FEHLER ({e})")
+                print(f"FAILED ({e})")
                 failed.extend(idx_batch)
             time.sleep(0.6)
 
         remaining = failed
 
     if remaining:
-        print(f"  ⚠  {len(remaining)} Punkte ohne Hoehenangabe.")
+        print(f"  ⚠  {len(remaining)} points with no elevation data.")
     return all_elev
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SHARED — CACHING (nur score-Modus)
+# SHARED — CACHING (score mode only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _cache_path(geojson_path):
@@ -292,7 +292,7 @@ def _load_cache(geojson_path):
         with open(cp, "r", encoding="utf-8") as f:
             data = json.load(f)
         age_h = (time.time() - data.get("_ts", 0)) / 3600
-        print(f"  Cache gefunden ({age_h:.1f}h alt) — Overpass wird uebersprungen.")
+        print(f"  Cache found ({age_h:.1f}h old) — skipping Overpass.")
         return data
     return None
 
@@ -302,7 +302,7 @@ def _save_cache(geojson_path, data):
     data["_ts"] = time.time()
     with open(cp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"  Cache gespeichert: {cp}")
+    print(f"  Cache saved: {cp}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -317,21 +317,21 @@ def _gmaps_url(lat, lon):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MODUS 1 — ELEVATION
+# MODE 1 — ELEVATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
     """
-    Python-API: Findet hoechstgelegene Picknicktische, Baenke, Liegen.
+    Python API: Finds highest-elevation picnic tables, benches and loungers.
 
     Args:
-        geojson_path: Pfad zur GeoJSON-Datei
-        tables:   Anzahl Picknicktische (None = deaktiviert)
-        benches:  Anzahl Baenke         (None = deaktiviert)
-        loungers: Anzahl Liegen         (None = deaktiviert)
+        geojson_path: Path to the GeoJSON file
+        tables:   Number of picnic tables to return (None = skip)
+        benches:  Number of benches to return       (None = skip)
+        loungers: Number of loungers to return      (None = skip)
 
     Returns:
-        Dict mit "mode", "park", "spots"
+        Dict with "mode", "park", "spots"
     """
     polygon, park_props, bbox = load_geojson(geojson_path)
     park_name = park_props.get("name") or os.path.basename(geojson_path)
@@ -345,7 +345,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
     }
     categories = {"picnic_table": [], "bench": [], "lounger": []}
 
-    print("\n-- Overpass-Abfragen ----------------------------------------------------")
+    print("\n-- Overpass queries -----------------------------------------------------")
     if active["tables"]:
         print("  leisure=picnic_table")
         raw = _run_overpass(_overpass_query_single(bbox, "leisure", "picnic_table"))
@@ -354,7 +354,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
              "lat": c[0], "lon": c[1], "tags": e.get("tags", {})}
             for e in raw if (c := _el_to_point(e)) and point_in_polygon(c[0], c[1], polygon)
         ]
-        print(f"    Im Park: {len(categories['picnic_table'])}")
+        print(f"    Inside park: {len(categories['picnic_table'])}")
         time.sleep(2)
 
     if active["benches"]:
@@ -365,7 +365,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
              "lat": c[0], "lon": c[1], "tags": e.get("tags", {})}
             for e in raw if (c := _el_to_point(e)) and point_in_polygon(c[0], c[1], polygon)
         ]
-        print(f"    Im Park: {len(categories['bench'])}")
+        print(f"    Inside park: {len(categories['bench'])}")
         time.sleep(2)
 
     if active["loungers"]:
@@ -376,17 +376,17 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
              "lat": c[0], "lon": c[1], "tags": e.get("tags", {})}
             for e in raw if (c := _el_to_point(e)) and point_in_polygon(c[0], c[1], polygon)
         ]
-        print(f"    Im Park: {len(categories['lounger'])}")
+        print(f"    Inside park: {len(categories['lounger'])}")
 
     all_pts = (categories["picnic_table"] +
                categories["bench"] +
                categories["lounger"])
 
     if not all_pts:
-        print("Keine Objekte gefunden.")
+        print("No objects found.")
         return {"mode": "elevation", "park": park_props, "spots": []}
 
-    print("\n-- Hoehenabfrage --------------------------------------------------------")
+    print("\n-- Elevation lookup -----------------------------------------------------")
     elevations = get_elevations(all_pts)
     for i, pt in enumerate(all_pts):
         pt["elevation_m"] = elevations[i]
@@ -394,7 +394,7 @@ def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
     def sort_key(p):
         return p["elevation_m"] if p["elevation_m"] is not None else -math.inf
 
-    # Spots zusammenstellen
+    # Build spot list
     spots = []
     rank  = 0
 
@@ -468,7 +468,7 @@ def _classify(elements, polygon):
             cats[cat].append(pt)
     for cat, pts in cats.items():
         if pts:
-            print(f"    {cat:20}: {len(pts)}")
+            print(f"    {cat:20}: {len(pts)} objects")
     return cats
 
 
@@ -511,7 +511,7 @@ def _fetch_elevations_with_neighbors(spots, dist_m=300):
 
     total = len(all_pts)
     n_spots = len(spots)
-    print(f"\n-- Hoehenabfrage ({n_spots} Spots + {total - n_spots} Nachbarpunkte = {total} total) --")
+    print(f"\n-- Elevation lookup ({n_spots} spots + {total - n_spots} neighbour points = {total} total) --")
     elevations = get_elevations(all_pts)
 
     for i, spot in enumerate(spots):
@@ -591,64 +591,64 @@ def _build_reason(spot):
         prom_str = f" (+{prom:.0f}m)" if prom and prom > 0 else ""
         parts.append(f"{elev:.0f}m{prom_str}")
 
-    labels = {"picnic_table": "Picknicktisch", "bench": "Bank",
-              "shelter": "Schutzdach", "viewpoint": "Aussichtspunkt", "lounger": "Liege"}
+    labels = {"picnic_table": "picnic table", "bench": "bench",
+              "shelter": "shelter", "viewpoint": "viewpoint", "lounger": "lounger"}
     am = " + ".join(labels[a] for a in spot.get("amenities", []) if a in labels)
     if am:
         parts.append(am)
 
     d_road = spot.get("nearest_road_m")
     if d_road:
-        if d_road >= 800:   parts.append(f"sehr ruhig ({d_road}m)")
-        elif d_road >= 300: parts.append(f"ruhig ({d_road}m)")
-        else:               parts.append(f"Strasse {d_road}m")
+        if d_road >= 800:   parts.append(f"very quiet ({d_road}m from road)")
+        elif d_road >= 300: parts.append(f"quiet ({d_road}m from road)")
+        else:               parts.append(f"road {d_road}m away")
 
     d_park = spot.get("nearest_parking_m")
     if d_park:
-        parts.append(f"Parkplatz {d_park}m")
+        parts.append(f"parking {d_park}m")
     return " · ".join(parts)
 
 
 def find_by_score(geojson_path, top=10, grid=150, refresh=False):
     """
-    Python-API: Bewertet Spots nach Prominenz, Ruhe, Sicht, Komfort, Erreichbarkeit.
+    Python API: Scores spots by prominence, quietness, view, comfort and accessibility.
 
     Args:
-        geojson_path: Pfad zur GeoJSON-Datei
-        top:     Anzahl zurueckgegebener Spots
-        grid:    Rastergroesse in Metern fuer Clustering
-        refresh: Cache ignorieren
+        geojson_path: Path to the GeoJSON file
+        top:     Number of spots to return
+        grid:    Grid cell size in metres for clustering
+        refresh: Ignore cache and re-query Overpass
 
     Returns:
-        Dict mit "mode", "park", "spots"
+        Dict with "mode", "park", "spots"
     """
     polygon, park_props, bbox = load_geojson(geojson_path)
     park_name = park_props.get("name") or os.path.basename(geojson_path)
     print(f"  Park:  {park_name}")
     print(f"  BBox:  S={bbox[0]:.4f} W={bbox[1]:.4f} N={bbox[2]:.4f} E={bbox[3]:.4f}")
 
-    # Overpass (mit Cache)
+    # Overpass (with cache)
     cached = None if refresh else _load_cache(geojson_path)
     if cached:
         cats = cached["categories"]
     else:
-        print("\n-- Overpass (ein kombinierter Call) ---------------------------------")
+        print("\n-- Overpass (single combined call) ----------------------------------")
         s, w, n, e = bbox
         elements = _run_overpass(_SCORE_QUERY.format(s=s, w=w, n=n, e=e))
-        print("\n  Klassifikation + Polygon-Filter:")
+        print("\n  Classification + polygon filter:")
         cats = _classify(elements, polygon)
         _save_cache(geojson_path, {"categories": cats})
 
-    # Grid-Clustering
-    print(f"\n-- Grid-Clustering ({grid}m) ----------------------------------------")
+    # Grid clustering
+    print(f"\n-- Grid clustering ({grid}m) -----------------------------------------")
     spots = _grid_cluster(cats, grid)
     comfort_total = sum(len(cats.get(c, [])) for c in _COMFORT_CATS)
-    print(f"  {comfort_total} Komfort-Objekte → {len(spots)} Spot-Kandidaten")
+    print(f"  {comfort_total} comfort objects → {len(spots)} spot candidates")
 
     if not spots:
         return {"mode": "score", "park": park_props, "spots": []}
 
-    # Elevation + Prominenz
+    # Elevation + prominence
     spots = _fetch_elevations_with_neighbors(spots)
 
     # Scoring
@@ -702,7 +702,7 @@ def find_by_score(geojson_path, top=10, grid=150, refresh=False):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CLI — AUSGABE
+# CLI — OUTPUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _print_elevation_results(result):
@@ -710,25 +710,25 @@ def _print_elevation_results(result):
     for s in result["spots"]:
         cats.setdefault(s["category"], []).append(s)
 
-    labels = {"picnic_table": "Picknicktische", "bench": "Baenke", "lounger": "Liegen"}
+    labels = {"picnic_table": "Picnic Tables", "bench": "Benches", "lounger": "Loungers"}
     for cat, label in labels.items():
         pts = cats.get(cat, [])
         if not pts:
-            print(f"\n  Keine {label} im Park gefunden — uebersprungen.")
+            print(f"\n  No {label} found inside park — skipped.")
             continue
         sep = "-" * 80
-        print(f"\n{'=' * 80}\n  Hoechstgelegene {label}  (Top {len(pts)})\n{'=' * 80}")
-        print(f"  {'#':>3}  {'Hoehe(m)':>8}  {'Lat':>10}  {'Lon':>10}  Name")
+        print(f"\n{'=' * 80}\n  Highest {label}  (Top {len(pts)})\n{'=' * 80}")
+        print(f"  {'#':>3}  {'Elev(m)':>7}  {'Lat':>10}  {'Lon':>10}  Name")
         print(sep)
         for s in pts:
             elev = f"{s['elevation_m']:.1f}" if s["elevation_m"] else "n/a"
             name = s["tags"].get("name") or ""
             print(f"  {s['rank']:>3}  {elev:>8}  {s['lat']:>10.5f}  {s['lon']:>10.5f}  {name}")
         print(sep)
-        print(f"\n  {'#':>3}  {'Hoehe':>7}  {'OSM':<46}  Google Maps")
+        print(f"\n  {'#':>3}  {'Elev':>6}  {'OSM':<46}  Google Maps")
         print(f"  {'-'*3}  {'-'*7}  {'-'*46}  {'-'*42}")
         for s in pts:
-            elev = f"{s['elevation_m']:.0f} m" if s["elevation_m"] else "n/a"
+            elev = f"{s['elevation_m']:.0f}m" if s["elevation_m"] else "n/a"
             print(f"  {s['rank']:>3}  {elev:>7}  {s['osm_url']:<46}  {s['gmaps_url']}")
 
 
@@ -736,9 +736,9 @@ def _print_score_results(result):
     spots = result["spots"]
     print(f"\n{'=' * 82}")
     print(f"  POTA SCORE RANKING — Top {len(spots)}")
-    print(f"  Prominenz 30 · Ruhe 25 · Freie Sicht 20 · Komfort 15 · Erreichbar 10")
+    print(f"  Prominence 30 · Quietness 25 · Open View 20 · Comfort 15 · Access 10")
     print(f"{'=' * 82}")
-    print(f"  {'#':>3}  {'Score':>5}  {'Prom':>5}  {'Ruhe':>5}  {'Sicht':>5}  {'Komf':>5}  {'Weg':>5}  Begruendung")
+    print(f"  {'#':>3}  {'Score':>5}  {'Prom':>5}  {'Quiet':>5}  {'View':>5}  {'Comf':>5}  {'Acc':>5}  Reason")
     print(f"  {'-'*3}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*36}")
     for s in spots:
         bd  = s.get("breakdown", {})
@@ -769,9 +769,9 @@ def _write_html_elevation(filename, result):
                  f"<td><a href='{s['osm_url']}' target='_blank'>OSM</a> "
                  f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>")
     _write_html_file(filename, park_name,
-                     "Hoechstgelegene Sitzgelegenheiten",
-                     "<tr><th>#</th><th>Hoehe</th><th>Typ</th><th>Name</th><th>Links</th></tr>",
-                     rows, subtitle="Ranking nach Elevation")
+                     "Highest Amenities by Elevation",
+                     "<tr><th>#</th><th>Elevation</th><th>Type</th><th>Name</th><th>Links</th></tr>",
+                     rows, subtitle="Ranked by elevation")
 
 
 def _write_html_score(filename, result):
@@ -792,11 +792,11 @@ def _write_html_score(filename, result):
         bars = "".join(
             f"<div style='font-size:10px;color:#5a7060'>{lbl} {v} {bar(v,mx,clr)}</div>"
             for lbl, v, mx, clr in [
-                ("Prominenz",   bd.get("prominenz",   0), 30, "#e8a030"),
-                ("Ruhe",        bd.get("ruhe",        0), 25, "#4caf78"),
-                ("Freie Sicht", bd.get("freie_sicht", 0), 20, "#60aacc"),
-                ("Komfort",     bd.get("komfort",     0), 15, "#cc80cc"),
-                ("Erreichbar",  bd.get("erreichbar",  0), 10, "#c06040"),
+                ("Prominence",  bd.get("prominenz",   0), 30, "#e8a030"),
+                ("Quietness",   bd.get("ruhe",        0), 25, "#4caf78"),
+                ("Open View",   bd.get("freie_sicht", 0), 20, "#60aacc"),
+                ("Comfort",     bd.get("komfort",     0), 15, "#cc80cc"),
+                ("Access",      bd.get("erreichbar",  0), 10, "#c06040"),
             ]
         )
         rows += (f"<tr><td>{s['rank']}</td>"
@@ -808,13 +808,13 @@ def _write_html_score(filename, result):
                  f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>")
 
     _write_html_file(filename, park_name, "POTA Score Ranking",
-                     "<tr><th>#</th><th>Score</th><th>Spot</th><th>Aufschluesselung</th><th>Links</th></tr>",
-                     rows, subtitle="Prominenz 30 · Ruhe 25 · Freie Sicht 20 · Komfort 15 · Erreichbar 10")
+                     "<tr><th>#</th><th>Score</th><th>Spot</th><th>Breakdown</th><th>Links</th></tr>",
+                     rows, subtitle="Prominence 30 · Quietness 25 · Open View 20 · Comfort 15 · Access 10")
 
 
 def _write_html_file(filename, park_name, title, thead, tbody, subtitle=""):
     content = f"""<!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>POTA – {html_lib.escape(park_name)}</title>
 <style>
@@ -839,16 +839,16 @@ def _write_html_file(filename, park_name, title, thead, tbody, subtitle=""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CLI — HAUPTPROGRAMM
+# CLI — MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(
         prog="pota_finder.py",
-        description="Findet die besten POTA-Aktivierungsspots in einem GeoJSON-Park.",
+        description="Finds the best POTA activation spots within a GeoJSON park boundary.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Beispiele:\n"
+            "Examples:\n"
             "  python3 pota_finder.py elevation DE-0042.geojson\n"
             "  python3 pota_finder.py elevation DE-0042.geojson -t 10 -b 20\n"
             "  python3 pota_finder.py score     DE-0042.geojson\n"
@@ -860,52 +860,52 @@ def main():
     # ── elevation ──
     pe = sub.add_parser(
         "elevation",
-        help="Ranking nach absoluter Hoehe",
-        description="Findet die hoechstgelegenen Picknicktische, Baenke und Liegen.\n"
-                    "Ohne Flags: alle 3 Kategorien, Top 5 je. Mit Flags: nur genannte Kategorien.",
+        help="Rank by absolute elevation",
+        description="Finds the highest-elevation picnic tables, benches and loungers.\n"
+                    "No flags: all 3 categories, top 5 each. With flags: only named categories.",
     )
-    pe.add_argument("geojson", help="Pfad zur GeoJSON-Datei")
+    pe.add_argument("geojson", help="Path to the GeoJSON file")
     pe.add_argument("-t", "--tables",   type=int, default=None, metavar="N",
-                    help="Top-N Picknicktische (kein Flag = alle Kategorien Top 5)")
+                    help="Top-N picnic tables (no flag = all categories top 5)")
     pe.add_argument("-b", "--benches",  type=int, default=None, metavar="N",
-                    help="Top-N Baenke")
+                    help="Top-N benches")
     pe.add_argument("-l", "--loungers", type=int, default=None, metavar="N",
-                    help="Top-N Liegen")
+                    help="Top-N loungers")
     pe.add_argument("-o", "--output",   default=None, metavar="FILE",
-                    help="JSON-Ausgabedatei (Standard: results_<park>.json)")
+                    help="JSON output file (default: results_<park>.json)")
     pe.add_argument("--html", action="store_true",
-                    help="HTML-Report erzeugen")
+                    help="Generate HTML report")
 
     # ── score ──
     ps = sub.add_parser(
         "score",
-        help="Ranking nach POTA-Score (Prominenz, Ruhe, Sicht, Komfort, Erreichbarkeit)",
+        help="Rank by POTA score (prominence, quietness, view, comfort, accessibility)",
         description=(
-            "Bewertet Spots nach:\n"
-            "  Prominenz   30 Pkt  — Kamm/Ruecken statt Flachland\n"
-            "  Ruhe        25 Pkt  — Distanz zu Strassen und Tourismus\n"
-            "  Freie Sicht 20 Pkt  — Proxy aus Prominenz + Umgebung\n"
-            "  Komfort     15 Pkt  — Tisch, Bank, Shelter\n"
-            "  Erreichbar  10 Pkt  — Parkplatz 200-800m ideal\n\n"
-            "Zweiter Aufruf mit demselben Park = 0 Overpass-Calls (Cache)."
+            "Scores spots by:\n"
+            "  Prominence  30 pts — ridge/summit beats flat plateau\n"
+            "  Quietness   25 pts — distance to roads and tourist infrastructure\n"
+            "  Open View   20 pts — proxy from prominence + surroundings\n"
+            "  Comfort     15 pts — picnic table, bench, shelter\n"
+            "  Access      10 pts — parking 200-800m is ideal\n\n"
+            "Second run on the same park = 0 Overpass calls (cache)."
         ),
     )
-    ps.add_argument("geojson",          help="Pfad zur GeoJSON-Datei")
+    ps.add_argument("geojson",          help="Path to the GeoJSON file")
     ps.add_argument("--top",   type=int, default=10, metavar="N",
-                    help="Top-N Spots (Standard: 10)")
+                    help="Top-N spots to return (default: 10)")
     ps.add_argument("--grid",  type=int, default=150, metavar="M",
-                    help="Rastergroesse in Metern (Standard: 150)")
+                    help="Grid cell size in metres for clustering (default: 150)")
     ps.add_argument("--refresh", action="store_true",
-                    help="Cache ignorieren und neu abfragen")
+                    help="Ignore cache and re-query Overpass")
     ps.add_argument("--html",    action="store_true",
-                    help="HTML-Report erzeugen")
+                    help="Generate HTML report")
     ps.add_argument("-o", "--output", default=None, metavar="FILE",
-                    help="JSON-Ausgabedatei (Standard: score_<park>.json)")
+                    help="JSON output file (default: score_<park>.json)")
 
     args = parser.parse_args()
     base = os.path.splitext(os.path.basename(args.geojson))[0]
 
-    print(f"Lade GeoJSON: {args.geojson}")
+    print(f"Loading GeoJSON: {args.geojson}")
 
     if args.mode == "elevation":
         any_explicit = any(x is not None for x in
@@ -921,12 +921,12 @@ def main():
         out = args.output or f"results_{base}.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-        print(f"\nGespeichert: {out}")
+        print(f"\nSaved: {out}")
 
         if args.html:
             html_file = f"results_{base}.html"
             _write_html_elevation(html_file, result)
-            print(f"HTML:        {html_file}")
+            print(f"HTML:  {html_file}")
 
     elif args.mode == "score":
         result = find_by_score(args.geojson,
@@ -936,12 +936,12 @@ def main():
         out = args.output or f"score_{base}.json"
         with open(out, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-        print(f"\nGespeichert: {out}")
+        print(f"\nSaved: {out}")
 
         if args.html:
             html_file = f"score_{base}.html"
             _write_html_score(html_file, result)
-            print(f"HTML:        {html_file}")
+            print(f"HTML:  {html_file}")
 
 
 if __name__ == "__main__":
