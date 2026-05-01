@@ -1,17 +1,8 @@
-# 🏕️ POTA Amenity & Score Finder
+# 🏕️ POTA Finder
 
-> Find the best POTA activation spots within any park boundary — ranked by elevation, prominence, quietness and comfort.
+> Find the best POTA activation spots within any park boundary — ranked by elevation or by a multi-factor POTA score.
 
-As a POTA activator you want to operate from a great location. This toolset takes the official park boundary from [pota-map.info](https://pota-map.info), queries OpenStreetMap for benches, picnic tables and loungers inside the park, and helps you find the ideal spot — either by raw elevation or by a multi-factor POTA score. Each result comes with a direct Google Maps link — where you can often preview the exact spot through Street View or user photos before you even leave home.
-
----
-
-## 🛠️ Two Tools
-
-| Script | What it does |
-|---|---|
-| `find_highest_amenities.py` | Finds the highest-elevation picnic tables, benches and loungers |
-| `pota_score.py` | Scores spots by prominence, quietness, open view, comfort and accessibility |
+As a POTA activator you want to operate from a great location. This tool takes the official park boundary from [pota-map.info](https://pota-map.info), queries OpenStreetMap for benches, picnic tables and loungers inside the park, and helps you find the ideal spot. Each result comes with a direct Google Maps link — where you can often preview the exact spot through Street View or user photos before you even leave home.
 
 ---
 
@@ -33,58 +24,72 @@ pip install requests
 
 ```bash
 # Simple elevation ranking
-python3 find_highest_amenities.py DE-0042.geojson
+python3 pota_finder.py elevation DE-0042.geojson
 
 # Smart POTA score ranking
-python3 pota_score.py DE-0042.geojson
+python3 pota_finder.py score DE-0042.geojson
 ```
 
 ---
 
-## 📡 find_highest_amenities.py
+## 🛠️ Two Modes
+
+```
+python3 pota_finder.py <mode> <geojson> [options]
+python3 pota_finder.py <mode> --help
+```
+
+| Mode | What it does |
+|---|---|
+| `elevation` | Finds the highest-elevation picnic tables, benches and loungers |
+| `score` | Scores spots by prominence, quietness, open view, comfort and accessibility |
+
+---
+
+## 📡 elevation mode
 
 Finds the highest-elevation picnic tables, benches and loungers within the park. Fast, simple, great for a first overview.
+
+**Category logic:** No flags → all 3 categories, top 5 each. As soon as you specify any flag, only the explicitly named categories are queried.
 
 ### Arguments
 
 | Argument | Description |
 |---|---|
 | `geojson` | Path to the GeoJSON file (required) |
-| `-t`, `--tables N` | Show top-N picnic tables |
-| `-b`, `--benches N` | Show top-N benches |
-| `-l`, `--loungers N` | Show top-N loungers |
-| `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
-| `--html-output [FILE]` | Also generate an HTML report |
-
-> **Category logic:** No flags → all 3 categories, top 5 each. As soon as you specify any flag, only the explicitly named categories are queried.
+| `-t`, `--tables N` | Top-N picnic tables |
+| `-b`, `--benches N` | Top-N benches |
+| `-l`, `--loungers N` | Top-N loungers |
+| `-o`, `--output FILE` | JSON output (default: `results_<park>.json`) |
+| `--html` | Generate HTML report |
 
 ```bash
 # All 3 categories, top 5 each
-python3 find_highest_amenities.py DE-0042.geojson
+python3 pota_finder.py elevation DE-0042.geojson
 
 # Only tables + benches
-python3 find_highest_amenities.py DE-0042.geojson -t 10 -b 20
+python3 pota_finder.py elevation DE-0042.geojson -t 10 -b 20
 
-# Only loungers
-python3 find_highest_amenities.py DE-0042.geojson -l 5
+# Only loungers, top 5
+python3 pota_finder.py elevation DE-0042.geojson -l 5
 
 # With HTML report
-python3 find_highest_amenities.py DE-0042.geojson --html-output
+python3 pota_finder.py elevation DE-0042.geojson -t 10 --html
 ```
 
 ---
 
-## 🎯 pota_score.py
+## 🎯 score mode
 
-Goes beyond elevation — scores every spot by what actually makes a POTA activation great.
+Goes beyond elevation — scores every spot by what actually makes a POTA activation great. A bench on a quiet ridge at 600m will often score higher than a picnic table on a busy plateau at 780m.
 
 ### Score Components (0–100 points)
 
 | Component | Points | What it measures |
 |---|---|---|
-| **Prominence** | 30 | How much higher is the spot than its surroundings (300m radius) — favors ridges and summits over flat plateaus |
+| **Prominence** | 30 | How much higher is the spot than its surroundings (300m radius) — favors ridges over flat plateaus |
 | **Quietness** | 25 | Distance to roads and tourist infrastructure — sweet spot 300–800m from roads |
-| **Open View** | 20 | Proxy from prominence + absence of tourist hotspots — likely open horizon |
+| **Open View** | 20 | Proxy from prominence + absence of tourist hotspots |
 | **Comfort** | 15 | Picnic table, shelter, bench, viewpoint marker |
 | **Accessibility** | 10 | Parking within 200–800m — close enough to carry equipment, far enough to be quiet |
 
@@ -93,24 +98,27 @@ Goes beyond elevation — scores every spot by what actually makes a POTA activa
 | Argument | Description |
 |---|---|
 | `geojson` | Path to the GeoJSON file (required) |
-| `--top N` | Top-N spots to show (default: 10) |
+| `--top N` | Top-N spots (default: 10) |
 | `--grid M` | Grid cell size in meters for clustering (default: 150) |
 | `--refresh` | Ignore cache and re-query all APIs |
-| `--html` | Generate an HTML report |
-| `-o FILE` | JSON output file (default: `score_<parkname>.json`) |
+| `--html` | Generate HTML report |
+| `-o FILE` | JSON output (default: `score_<park>.json`) |
 
 ```bash
 # Standard run
-python3 pota_score.py DE-0042.geojson
+python3 pota_finder.py score DE-0042.geojson
 
 # Top 15 with HTML report
-python3 pota_score.py DE-0042.geojson --top 15 --html
+python3 pota_finder.py score DE-0042.geojson --top 15 --html
 
 # Re-run with cached Overpass data (0 extra API calls)
-python3 pota_score.py DE-0042.geojson --top 20
+python3 pota_finder.py score DE-0042.geojson --top 20
 
 # Force fresh data
-python3 pota_score.py DE-0042.geojson --refresh
+python3 pota_finder.py score DE-0042.geojson --refresh
+
+# Finer grid = more candidate spots
+python3 pota_finder.py score DE-0042.geojson --grid 80
 ```
 
 ### Sample Output
@@ -122,30 +130,77 @@ python3 pota_score.py DE-0042.geojson --refresh
 ================================================================================
   #  Score  Prom  Ruhe  Sicht  Komf  Weg  Begruendung
   ---  -----  -----  -----  -----  -----  -----  ----------------------------------------
-    1     81     22     20     15      8    10  612m +12m Prominenz · Bank · ruhig (520m von Strasse) · Parkplatz 380m
-    2     74     14     20     10     15    10  783m +8m Prominenz · Picknicktisch + Bank · Parkplatz 340m
-    3     68      7     25     10      8    10  540m +4m Prominenz · Bank · sehr ruhig (920m von Strasse) · Parkplatz 680m
+    1     81     22     20     15      8    10  612m +12m · Bank · ruhig (520m) · Parkplatz 380m
+    2     74     14     20     10     15    10  783m +8m · Picknicktisch + Bank · Parkplatz 340m
+    3     68      7     25     10      8    10  540m +4m · Bank · sehr ruhig (920m) · Parkplatz 680m
 ```
 
-Note how spot #1 scores higher than the higher-elevation spot #2 — it sits on a ridge with a better view and is further from roads, exactly what you want for a POTA activation.
+Spot #1 scores higher than the higher-elevation spot #2 — it sits on a ridge with a better view and is further from roads, exactly what you want for a POTA activation.
+
+---
+
+## 🐍 Python API
+
+Both modes are importable as clean functions — useful if you want to embed the logic in your own project.
+
+```python
+from pota_finder import find_by_elevation, find_by_score
+
+# Elevation mode
+result = find_by_elevation("DE-0042.geojson", tables=10, benches=20)
+
+# Score mode
+result = find_by_score("DE-0042.geojson", top=15, grid=150)
+
+# Both return the same format
+for spot in result["spots"]:
+    print(spot["rank"], spot["elevation_m"], spot["score"], spot["gmaps_url"])
+```
+
+### Output Format
+
+Both modes return the same JSON structure — `score` and `breakdown` are `null`/`{}` in elevation mode:
+
+```json
+{
+  "mode": "elevation | score",
+  "park": { "name": "Hoher Vogelsberg Nature Park", "id": "DE-0042" },
+  "spots": [
+    {
+      "rank":         1,
+      "lat":          50.517,
+      "lon":          9.238,
+      "elevation_m":  783,
+      "score":        81.0,
+      "breakdown":    {
+        "prominenz": 22, "ruhe": 20, "freie_sicht": 15, "komfort": 8, "erreichbar": 10
+      },
+      "amenities":    ["picnic_table", "bench"],
+      "reason":       "783m +8m · Picknicktisch · ruhig (520m) · Parkplatz 340m",
+      "osm_url":      "https://www.openstreetmap.org/node/123456789",
+      "gmaps_url":    "https://www.google.com/maps?q=50.517,9.238"
+    }
+  ]
+}
+```
 
 ---
 
 ## 🔧 How It Works
 
-### find_highest_amenities.py
-1. Queries Overpass API for each requested category
+### elevation mode
+1. Queries Overpass API for each requested category separately
 2. Filters results to park polygon via ray-casting
 3. Fetches elevation from Open-Topo-Data (SRTM30m) with Open-Elevation fallback
 4. Sorts by elevation, outputs table + links
 
-### pota_score.py
+### score mode
 1. **One Overpass call** — fetches all categories at once (comfort objects, roads, parking, tourist infrastructure)
 2. **Polygon filter** — ray-casting, only park-interior objects kept
 3. **Grid clustering** — groups objects into 150m cells, one representative spot per cell
-4. **Elevation** — fetches height for each spot centre + 4 neighbour points (N/E/S/W, 300m) to compute local prominence
+4. **Elevation + prominence** — fetches height for each spot centre + 4 neighbour points (N/E/S/W, 300m) to compute local prominence
 5. **Scoring** — all calculations local, no extra API calls
-6. **Cache** — Overpass result saved as `.cache_score_<park>.json`; subsequent runs skip the Overpass call entirely
+6. **Cache** — Overpass result saved as `.cache_pota_<park>.json`; subsequent runs skip the Overpass call entirely
 
 ---
 
@@ -164,8 +219,8 @@ Note how spot #1 scores higher than the higher-elevation spot #2 — it sits on 
 
 - Elevation data is SRTM-based, accurate to roughly ±10 m — sufficient for relative ranking within a park.
 - OSM coverage varies. Dense tourist areas are well-mapped; remote parks may have fewer tagged amenities.
-- Both scripts use free public APIs — please don't run them in rapid loops. One query per park is the intended use.
-- `pota_score.py` caches Overpass results automatically. Use `--refresh` only when you need fresh OSM data.
+- Both modes use free public APIs — please don't run them in rapid loops. One query per park is the intended use.
+- `score` mode caches Overpass results automatically. Use `--refresh` only when you need fresh OSM data.
 
 ---
 
