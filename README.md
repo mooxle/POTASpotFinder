@@ -1,8 +1,8 @@
 # 🏕️ POTA Highest Amenities Finder
 
-> Find the highest-elevation picnic tables and benches within any POTA park boundary — because the best activation spot usually has the best view.
+> Find the highest-elevation picnic tables, benches and loungers within any POTA park boundary — because the best activation spot usually has the best view.
 
-As a POTA activator you want to operate from a great location. This tool takes the official park boundary from [pota-map.info](https://pota-map.info), queries OpenStreetMap for benches and picnic tables inside the park, and ranks them by elevation. Each result comes with a direct Google Maps link — where you can often preview the exact spot through Street View or user photos before you even leave home.
+As a POTA activator you want to operate from a great location. This tool takes the official park boundary from [pota-map.info](https://pota-map.info), queries OpenStreetMap for benches, picnic tables and loungers inside the park, and ranks them by elevation. Each result comes with a direct Google Maps link — where you can often preview the exact spot through Street View or user photos before you even leave home.
 
 ---
 
@@ -10,12 +10,13 @@ As a POTA activator you want to operate from a great location. This tool takes t
 
 - Works with **any POTA park** that has a GeoJSON boundary on pota-map.info
 - Fetches amenities live from **OpenStreetMap** via the Overpass API
+- Searches for **picnic tables, benches and loungers** — skips categories with zero results automatically
+- **Smart category selection** — no arguments searches all three; specifying any flag limits to only those categories
 - Accurate **point-in-polygon filtering** (ray-casting) — no false positives from the bounding box
 - **Elevation ranking** via Open-Topo-Data (SRTM30m), with automatic fallback to Open-Elevation
 - Automatic **retry with exponential backoff** if an elevation provider is slow or overloaded
 - One-click links to **OpenStreetMap** and **Google Maps** (with photo previews) for every result
-- Fully configurable: choose how many tables and benches to return
-- Saves results as **JSON** for further processing
+- Saves results as **JSON** and optionally as an **HTML report** for further use
 
 ---
 
@@ -54,31 +55,37 @@ python3 find_highest_amenities.py <geojson> [options]
 | Argument | Description |
 |---|---|
 | `geojson` | Path to the GeoJSON file (required) |
-| `-t`, `--tables N` | Show top-N picnic tables (default: **10**) |
-| `-b`, `--benches N` | Show top-N benches (default: **20**) |
+| `-t`, `--tables N` | Show top-N picnic tables |
+| `-b`, `--benches N` | Show top-N benches |
+| `-l`, `--loungers N` | Show top-N loungers |
 | `-o`, `--output FILE` | Output JSON filename (default: `results_<parkname>.json`) |
-| `--html-output` | Outputs result as HTML (default: `results_<parkname>.html`) |
+| `--html-output [FILE]` | Also generate an HTML report (default: `results_<parkname>.html`) |
+
+> **Category logic:** Running without any `-t`/`-b`/`-l` flag searches all three categories (top 5 each). As soon as you specify any flag, only the explicitly named categories are queried — saving unnecessary API calls.
 
 ### Examples
 
 ```bash
-# Default — top 10 tables, top 20 benches
+# No flags — all 3 categories, top 5 each
 python3 find_highest_amenities.py DE-0042.geojson
 
-# Custom counts
-python3 find_highest_amenities.py DE-0042.geojson --tables 5 --benches 10
+# Only loungers, top 5
+python3 find_highest_amenities.py DE-0042.geojson -l 5
 
-# Short flags
-python3 find_highest_amenities.py DE-0042.geojson -t 5 -b 10
+# Only tables + benches, custom counts
+python3 find_highest_amenities.py DE-0042.geojson -t 10 -b 20
+
+# All three with custom counts
+python3 find_highest_amenities.py DE-0042.geojson -t 10 -b 20 -l 5
 
 # Custom output file
-python3 find_highest_amenities.py DE-0042.geojson -t 15 -b 30 -o vogelsberg.json
+python3 find_highest_amenities.py DE-0042.geojson -t 10 -b 20 -o vogelsberg.json
 
-# Add HTML output with default filename
+# Add HTML report with default filename
 python3 find_highest_amenities.py DE-0042.geojson --html-output
 
-# Add HTML output with our own filename
-python3 find_highest_amenities.py DE-0042.geojson --html-output my_own_filename.html
+# Add HTML report with custom filename
+python3 find_highest_amenities.py DE-0042.geojson --html-output my_results.html
 
 # Any other park
 python3 find_highest_amenities.py US-1234.geojson -t 10 -b 20
@@ -97,17 +104,19 @@ python3 find_highest_amenities.py --help
 ================================================================================
     #  Hoehe(m)         Lat         Lon  Name
 --------------------------------------------------------------------------------
-    1     772.0    50.51823     9.23901
-    2     768.0    50.51713     9.23849
-    3     761.0    50.51044     9.22585
+    1     783.0    50.51690     9.23852
+    2     780.0    50.51713     9.23849
+    3     760.0    50.51044     9.22585
   ...
 --------------------------------------------------------------------------------
 
 -- Links Picknicktische Top 10 ------------------------------------------------
   #    Hoehe  OSM                                               Google Maps
   ---  -------  ------------------------------------------------  ------------------------------------------
-    1    772 m  https://www.openstreetmap.org/node/123456789      https://www.google.com/maps?q=50.51823,9.23901
-    2    768 m  https://www.openstreetmap.org/node/123456790      https://www.google.com/maps?q=50.51713,9.23849
+    1    783 m  https://www.openstreetmap.org/node/1236551130     https://www.google.com/maps?q=50.5168972,9.2385157
+    2    780 m  https://www.openstreetmap.org/node/1236551124     https://www.google.com/maps?q=50.5171308,9.2384856
+
+  Keine Liegen im Park gefunden — uebersprungen.
 ```
 
 The Google Maps links are especially useful — Street View and user-uploaded photos often let you **scout the exact spot** before heading out into the field.
@@ -121,7 +130,7 @@ Results are saved as structured JSON for easy reuse:
 ```json
 {
   "park": { "name": "Hoher Vogelsberg Nature Park", "id": "DE-0042" },
-  "query": { "top_tables": 10, "top_benches": 20 },
+  "query": { "top_tables": 5, "top_benches": 5, "top_loungers": 5 },
   "picnic_tables": [
     {
       "osm_type": "node",
@@ -134,7 +143,8 @@ Results are saved as structured JSON for easy reuse:
       "gmaps_url": "https://www.google.com/maps?q=50.51823,9.23901"
     }
   ],
-  "benches": [ ... ]
+  "benches": [ ... ],
+  "loungers": [ ... ]
 }
 ```
 
@@ -143,10 +153,10 @@ Results are saved as structured JSON for easy reuse:
 ## 🔧 How It Works
 
 1. **Load boundary** — reads the GeoJSON polygon from pota-map.info
-2. **Overpass API** — queries OpenStreetMap for `leisure=picnic_table` and `amenity=bench` within the bounding box (with automatic fallback to mirror servers)
-3. **Point-in-polygon** — filters results using a ray-casting algorithm to ensure only objects truly inside the park boundary are kept
+2. **Overpass API** — queries OpenStreetMap for `leisure=picnic_table`, `amenity=bench` and `leisure=lounger` within the bounding box — only for the requested categories (with automatic fallback to mirror servers)
+3. **Point-in-polygon** — filters results using a ray-casting algorithm to ensure only objects truly inside the park boundary are kept; empty categories are skipped entirely
 4. **Elevation** — queries [Open-Topo-Data](https://www.opentopodata.org) (SRTM30m) in batches; falls back to [Open-Elevation](https://api.open-elevation.com) for any failed batches. Each batch is retried up to 3× with exponential backoff before failing over.
-5. **Rank & output** — sorts by elevation descending, prints tables, and saves JSON
+5. **Rank & output** — sorts by elevation descending, prints tables, and saves JSON (+ optional HTML)
 
 ---
 
@@ -155,7 +165,7 @@ Results are saved as structured JSON for easy reuse:
 | Source | What for |
 |---|---|
 | [pota-map.info](https://pota-map.info) | Park boundary GeoJSON files |
-| [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | Benches and picnic tables |
+| [OpenStreetMap](https://www.openstreetmap.org) via [Overpass API](https://overpass-api.de) | Picnic tables, benches and loungers |
 | [Open-Topo-Data](https://www.opentopodata.org) | Elevation data — primary (SRTM30m) |
 | [Open-Elevation](https://api.open-elevation.com) | Elevation data — fallback (SRTM) |
 
