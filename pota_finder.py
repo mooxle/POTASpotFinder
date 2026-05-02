@@ -145,6 +145,12 @@ ELEVATION_CACHE_FILE    = ".cache_elevation.json"
 OPENTOPO_DAILY_LIMIT    = 1000
 OPENTOPO_DAILY_WARN_AT  = 900   # warn when this many requests used today
 
+# Score-mode Overpass cache — discard entries older than this many hours
+CACHE_MAX_AGE_H = 48
+
+# Earth radius used in all geographic calculations
+EARTH_RADIUS_M = 6_371_000
+
 HEADERS = {
     "Accept":       "*/*",
     "Content-Type": "application/x-www-form-urlencoded",
@@ -370,20 +376,22 @@ def _el_to_point(el):
 # self-hosted Open-Topo-Data instance (recommended for heavy usage).
 ELEVATION_PROVIDERS = [
     {
-        "name": "open-topo-data (SRTM30m)",
-        "url":  "https://api.opentopodata.org/v1/srtm30m",
+        "name":     "open-topo-data (SRTM30m)",
+        "url":      "https://api.opentopodata.org/v1/srtm30m",
+        "rate_key": "opentopo",
         "build_payload": lambda locs: {
             "locations": "|".join(f"{l['latitude']},{l['longitude']}" for l in locs)},
-        "parse":  lambda data: [r.get("elevation") for r in data.get("results", [])],
-        "method": "GET",
+        "parse":    lambda data: [r.get("elevation") for r in data.get("results", [])],
+        "method":   "GET",
         "batch_size": 100,
     },
     {
-        "name": "open-elevation.com",
-        "url":  "https://api.open-elevation.com/api/v1/lookup",
+        "name":     "open-elevation.com",
+        "url":      "https://api.open-elevation.com/api/v1/lookup",
+        "rate_key": "openelevation",
         "build_payload": lambda locs: {"locations": locs},
-        "parse":  lambda data: [r.get("elevation") for r in data.get("results", [])],
-        "method": "POST",
+        "parse":    lambda data: [r.get("elevation") for r in data.get("results", [])],
+        "method":   "POST",
         "batch_size": 100,
     },
 ]
@@ -392,7 +400,7 @@ RETRY_COUNT = 3
 
 def _fetch_elevation_batch(provider, locations):
     """Fetches one batch from a provider. Rate-limited + daily-limit-aware + retry."""
-    rate_key = "opentopo" if "opentopodata" in provider["url"] else "openelevation"
+    rate_key = provider["rate_key"]
     rate_val = RATE_LIMIT_OPENTOPO if rate_key == "opentopo" else RATE_LIMIT_OPENELEVATION
     payload  = provider["build_payload"](locations)
 
@@ -489,6 +497,9 @@ def _load_cache(geojson_path):
         with open(cp, "r", encoding="utf-8") as f:
             data = json.load(f)
         age_h = (time.time() - data.get("_ts", 0)) / 3600
+        if age_h > CACHE_MAX_AGE_H:
+            print(f"  Cache expired ({age_h:.1f}h old, limit {CACHE_MAX_AGE_H}h) — re-querying Overpass.")
+            return None
         print(f"  Cache found ({age_h:.1f}h old) — skipping Overpass.")
         return data
     return None
@@ -599,8 +610,6 @@ def find_by_elevation(
 
     # Build spot list
     spots = []
-    rank  = 0
-
     cat_map = [
         ("picnic_table", tables,   "Picknicktisch"),
         ("bench",        benches,  "Bank"),
@@ -609,6 +618,7 @@ def find_by_elevation(
     for cat_key, top_n, label in cat_map:
         if top_n is None:
             continue
+        rank = 0
         sorted_pts = sorted(categories[cat_key], key=sort_key, reverse=True)
         for pt in sorted_pts[:top_n]:
             rank += 1
@@ -792,15 +802,17 @@ def _fetch_elevations_with_neighbors(spots, full_horizon=False):
               f" = {n_pts2} points --")
         elev2 = get_elevations(phase2_pts)
 
+        spot_to_phase1_idx = {id(s): j for j, s in enumerate(spots)}
         for i, spot in enumerate(top_spots):
             se = spot["elevation_m"]
             if se is None:
                 spot["horizon_open_pct"] = None
                 continue
             open_dirs = 0
+            j = spot_to_phase1_idx[id(spot)]
             for b in range(len(_HORIZON_BEARINGS)):
                 # Near point (from phase 1)
-                near_e = elev1[nb_idx1[spots.index(spot)][0][b]]
+                near_e = elev1[nb_idx1[j][0][b]]
                 # Far points (from phase 2)
                 far_es = [elev2[nb_idx2[i][d][b]] for d in range(len(_HORIZON_FAR_DISTS))]
                 all_e  = [e for e in [near_e] + far_es if e is not None]
@@ -850,9 +862,6 @@ ROAD_THRESHOLDS     = [(100, 0), (300, 8), (800, 20), (2000, 15)]
 ROAD_DEFAULT_PTS    = 10
 HOTSPOT_PENALTY_NEAR = 5   # tourist hotspot < 100m
 HOTSPOT_PENALTY_MID  = 2   # tourist hotspot < 300m
-
-# Earth radius used in all geographic calculations
-EARTH_RADIUS_M = 6_371_000
 
 
 def _score_prominence(prom):
@@ -930,7 +939,7 @@ def _build_reason(spot):
     elev = spot.get("elevation_m")
     prom = spot.get("prominence_m")
     if elev is not None:
-        prom_str = f" (+{prom:.0f}m)" if prom and prom > 0 else ""
+        prom_str = f" (+{prom:.0f}m)" if prom is not None and prom > 0 else ""
         parts.append(f"{elev:.0f}m{prom_str}")
 
     labels = {"picnic_table": "picnic table", "bench": "bench",
@@ -1349,8 +1358,9 @@ def _write_html_score(filename, result):
                 ("Acc",    bd.get("erreichbar", 0), 10, "#c06040"),
             ]
         )
+        slat, slon = s["lat"], s["lon"]
         rows += (
-            f"<tr onclick='flyTo({s["lat"]},{s["lon"]})'>"
+            f"<tr onclick='flyTo({slat},{slon})'>"
             f"<td>{s['rank']}</td>"
             f"<td style='font-size:20px;font-weight:700;color:{col};text-align:center'>{sc}</td>"
             f"<td><span style='font-size:11px;color:#5a7060'>{hz_s} open horizon</span><br>"
@@ -1460,43 +1470,6 @@ function flyTo(lat, lon) {{
         f.write(html_content)
 
 
-def _write_html_file(filename, park_name, title, thead, tbody, subtitle=""):
-    """Simple HTML table output (used by elevation mode)."""
-    content = f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>POTA – {html_lib.escape(park_name)}</title>
-<style>
-  body{{background:#0d1410;color:#c8d8cc;font-family:Inter,sans-serif;padding:32px;max-width:1100px;margin:0 auto}}
-  h1{{font-size:24px;color:#e8a030;margin-bottom:4px}}
-  .sub{{color:#5a7060;font-size:12px;font-family:monospace;margin-bottom:28px}}
-  table{{width:100%;border-collapse:collapse;font-size:13px}}
-  th{{text-align:left;padding:8px 12px;color:#5a7060;font-weight:400;font-size:10px;
-      letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid #2a3d35}}
-  td{{padding:11px 12px;border-bottom:1px solid #141c18;vertical-align:middle}}
-  tr:hover td{{background:#111810}}
-  a{{color:#e8a030;text-decoration:none;margin-right:6px;font-size:11px}}
-  a:nth-child(2){{color:#4caf78}}
-</style></head>
-<body>
-<h1>🏕 {html_lib.escape(title)} — {html_lib.escape(park_name)}</h1>
-<p class="sub">{html_lib.escape(subtitle)}</p>
-<table><thead>{thead}</thead><tbody>{tbody}</tbody></table>
-<footer style="margin-top:40px;padding-top:16px;border-top:1px solid #1a2420;
-               font-size:11px;color:#3a5040;font-family:monospace">
-  © <a href="https://www.openstreetmap.org/copyright" target="_blank"
-       style="color:#3a5040">OpenStreetMap contributors</a>,
-  <a href="https://opendatacommons.org/licenses/odbl/" target="_blank"
-     style="color:#3a5040">ODbL 1.0</a>
-  &nbsp;·&nbsp; Elevation: SRTM, public domain (NASA/USGS)
-  &nbsp;·&nbsp; Park boundaries: <a href="https://pota-map.info" target="_blank"
-                                    style="color:#3a5040">pota-map.info</a>
-</footer>
-</body></html>"""
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI — MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1581,12 +1554,13 @@ def main():
     # Override elevation provider if custom URL given
     if args.elevation_url:
         ELEVATION_PROVIDERS.insert(0, {
-            "name": f"custom ({args.elevation_url})",
-            "url":  args.elevation_url.rstrip("/") + "/v1/srtm30m",
+            "name":     f"custom ({args.elevation_url})",
+            "url":      args.elevation_url.rstrip("/") + "/v1/srtm30m",
+            "rate_key": "opentopo",
             "build_payload": lambda locs: {
                 "locations": "|".join(f"{l['latitude']},{l['longitude']}" for l in locs)},
-            "parse":  lambda data: [r.get("elevation") for r in data.get("results", [])],
-            "method": "GET",
+            "parse":    lambda data: [r.get("elevation") for r in data.get("results", [])],
+            "method":   "GET",
             "batch_size": 100,
         })
         print(f"  Using custom elevation URL: {args.elevation_url}")
