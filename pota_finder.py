@@ -59,7 +59,7 @@ import requests
 # SHARED — GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def point_in_polygon(lat, lon, polygon):
+def point_in_polygon(lat: float, lon: float, polygon: list) -> bool:
     """Ray-casting algorithm: returns True if (lat, lon) is inside the polygon."""
     x, y = lon, lat
     inside = False
@@ -74,9 +74,9 @@ def point_in_polygon(lat, lon, polygon):
     return inside
 
 
-def haversine_m(lat1, lon1, lat2, lon2):
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distance in metres between two WGS84 coordinates."""
-    R = 6_371_000
+    R = EARTH_RADIUS_M
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlam = math.radians(lon2 - lon1)
@@ -86,7 +86,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 def offset_point(lat, lon, bearing_deg, dist_m):
     """Offsets a point by dist_m metres in the given bearing direction."""
-    R = 6_371_000
+    R = EARTH_RADIUS_M
     d = dist_m / R
     b = math.radians(bearing_deg)
     phi1, lam1 = math.radians(lat), math.radians(lon)
@@ -97,7 +97,7 @@ def offset_point(lat, lon, bearing_deg, dist_m):
     return math.degrees(phi2), math.degrees(lam2)
 
 
-def load_geojson(path):
+def load_geojson(path: str) -> tuple:
     """Loads GeoJSON file, returns (polygon, park_props, bbox)."""
     with open(path, "r", encoding="utf-8") as f:
         feature = json.load(f)
@@ -344,8 +344,11 @@ def _run_overpass(query):
             els = resp.json().get("elements", [])
             print(f"    OK – {len(els)} elements")
             return els
+        except requests.exceptions.RequestException as ex:
+            print(f"    Network error: {ex}")
+            time.sleep(2)
         except Exception as ex:
-            print(f"    Error: {ex}")
+            print(f"    Unexpected error: {ex}")
             time.sleep(2)
     raise RuntimeError("All Overpass endpoints failed.")
 
@@ -363,6 +366,8 @@ def _el_to_point(el):
 # SHARED — ELEVATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Override ELEVATION_PROVIDERS or use --elevation-url CLI flag to use a
+# self-hosted Open-Topo-Data instance (recommended for heavy usage).
 ELEVATION_PROVIDERS = [
     {
         "name": "open-topo-data (SRTM30m)",
@@ -407,13 +412,16 @@ def _fetch_elevation_batch(provider, locations):
                 if OPENTOPO_DAILY_LIMIT and used >= OPENTOPO_DAILY_LIMIT:
                     print(f"  ⚠  Open-Topo-Data daily limit reached ({used}/{OPENTOPO_DAILY_LIMIT}).")
             return provider["parse"](r.json())
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             if attempt < RETRY_COUNT:
                 wait = 2 ** attempt
                 print(f"    Attempt {attempt} failed ({e}) — retrying in {wait}s ...")
                 time.sleep(wait)
             else:
                 raise
+        except Exception as e:
+            # Re-raise non-network errors immediately (programming errors)
+            raise RuntimeError(f"Unexpected error in elevation batch: {e}") from e
 
 
 def get_elevations(points):
@@ -509,7 +517,12 @@ def _gmaps_url(lat, lon):
 # MODE 1 — ELEVATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def find_by_elevation(geojson_path, tables=5, benches=5, loungers=5):
+def find_by_elevation(
+    geojson_path: str,
+    tables: int | None = 5,
+    benches: int | None = 5,
+    loungers: int | None = 5,
+) -> dict:
     """
     Python API: Finds highest-elevation picnic tables, benches and loungers.
 
@@ -811,9 +824,40 @@ def _fetch_elevations_with_neighbors(spots, full_horizon=False):
     return spots
 
 
+# ── Scoring weights (override these to tune the algorithm) ──────────────────
+# Maximum points per component — must sum to 100
+SCORE_MAX_PROMINENCE    = 30
+SCORE_MAX_QUIETNESS     = 25
+SCORE_MAX_HORIZON       = 20
+SCORE_MAX_COMFORT       = 15
+SCORE_MAX_ACCESSIBILITY = 10
+
+# Comfort points per amenity type (capped at SCORE_MAX_COMFORT)
+COMFORT_POINTS = {
+    "picnic_table": 8,
+    "shelter":      5,
+    "bench":        4,
+    "viewpoint":    2,
+    "lounger":      2,
+}
+
+# Accessibility: (distance_metres, points) — first matching threshold wins
+PARKING_THRESHOLDS  = [(200, 4), (800, 10), (2000, 7)]
+PARKING_DEFAULT_PTS = 2   # > 2km or no parking found
+
+# Quietness: (distance_metres, points) before tourist hotspot penalty
+ROAD_THRESHOLDS     = [(100, 0), (300, 8), (800, 20), (2000, 15)]
+ROAD_DEFAULT_PTS    = 10
+HOTSPOT_PENALTY_NEAR = 5   # tourist hotspot < 100m
+HOTSPOT_PENALTY_MID  = 2   # tourist hotspot < 300m
+
+# Earth radius used in all geographic calculations
+EARTH_RADIUS_M = 6_371_000
+
+
 def _score_prominence(prom):
     if prom is None: return 0
-    if prom >= 30:   return 30
+    if prom >= 30:   return SCORE_MAX_PROMINENCE
     if prom >= 15:   return 22
     if prom >= 8:    return 14
     if prom >= 3:    return 7
@@ -830,14 +874,13 @@ def _score_ruhe(spot, road_major, road_minor, hotspots):
     d_road = min(nearest(road_major), nearest(road_minor))
     d_hot  = nearest(hotspots)
 
-    if d_road < 100:    rs = 0
-    elif d_road < 300:  rs = 8
-    elif d_road < 800:  rs = 20
-    elif d_road < 2000: rs = 15
-    else:               rs = 10
-
-    penalty = 5 if d_hot < 100 else 2 if d_hot < 300 else 0
-    return max(0, min(25, rs - penalty)), d_road
+    rs = ROAD_DEFAULT_PTS
+    for threshold, p in ROAD_THRESHOLDS:
+        if d_road < threshold:
+            rs = p
+            break
+    penalty = HOTSPOT_PENALTY_NEAR if d_hot < 100 else HOTSPOT_PENALTY_MID if d_hot < 300 else 0
+    return max(0, min(SCORE_MAX_QUIETNESS, rs - penalty)), d_road
 
 
 def _score_horizon(spot):
@@ -852,7 +895,7 @@ def _score_horizon(spot):
     pct = spot.get("horizon_open_pct")
     if pct is None:
         s = 5   # no data — conservative default
-    elif pct >= 87:  s = 20   # 7–8 of 8 directions open
+    elif pct >= 87:  s = SCORE_MAX_HORIZON   # 7–8 of 8 directions open
     elif pct >= 75:  s = 17   # 6 of 8
     elif pct >= 62:  s = 14   # 5 of 8
     elif pct >= 50:  s = 10   # 4 of 8
@@ -861,13 +904,12 @@ def _score_horizon(spot):
     else:            s = 1    # mostly blocked
 
     if "viewpoint" in spot.get("amenities", []):
-        s = min(20, s + 3)
+        s = min(SCORE_MAX_HORIZON, s + 3)
     return s
 
 
 def _score_comfort(amenities):
-    POINTS = {"picnic_table": 8, "shelter": 5, "bench": 4, "viewpoint": 2, "lounger": 2}
-    return min(15, sum(POINTS.get(a, 0) for a in amenities))
+    return min(SCORE_MAX_COMFORT, sum(COMFORT_POINTS.get(a, 0) for a in amenities))
 
 
 def _score_access(spot, parking_pts):
@@ -875,10 +917,11 @@ def _score_access(spot, parking_pts):
         return 3, None
     lat, lon = spot["lat"], spot["lon"]
     d = min(haversine_m(lat, lon, p["lat"], p["lon"]) for p in parking_pts)
-    if d < 200:    pts = 4
-    elif d < 800:  pts = 10
-    elif d < 2000: pts = 7
-    else:          pts = 2
+    pts = PARKING_DEFAULT_PTS
+    for threshold, p in PARKING_THRESHOLDS:
+        if d < threshold:
+            pts = p
+            break
     return pts, round(d)
 
 
@@ -914,7 +957,13 @@ def _build_reason(spot):
     return " · ".join(parts)
 
 
-def find_by_score(geojson_path, top=10, grid=150, refresh=False, horizon=False):
+def find_by_score(
+    geojson_path: str,
+    top: int = 10,
+    grid: int = 150,
+    refresh: bool = False,
+    horizon: bool = False,
+) -> dict:
     """
     Python API: Scores spots by prominence, quietness, view, comfort and accessibility.
 
@@ -1464,6 +1513,7 @@ def main():
             "  python3 pota_finder.py score     DE-0042.geojson\n"
             "  python3 pota_finder.py score     DE-0042.geojson --top 15 --html\n"
             "  python3 pota_finder.py score     DE-0042.geojson --horizon          # full horizon (slower first run, cached after)\n"
+            "  python3 pota_finder.py score     DE-0042.geojson --elevation-url http://localhost:5000  # self-hosted elevation\n"
         ),
     )
     sub = parser.add_subparsers(dest="mode", required=True, metavar="mode")
@@ -1482,6 +1532,9 @@ def main():
                     help="Top-N benches")
     pe.add_argument("-l", "--loungers", type=int, default=None, metavar="N",
                     help="Top-N loungers")
+    pe.add_argument("--elevation-url", default=None, metavar="URL",
+                    help="Custom Open-Topo-Data base URL for self-hosted instances "
+                         "(e.g. http://localhost:5000). Replaces the default provider.")
     pe.add_argument("-o", "--output",   default=None, metavar="FILE",
                     help="JSON output file (default: results_<park>.json)")
     pe.add_argument("--html", action="store_true",
@@ -1506,6 +1559,9 @@ def main():
                     help="Top-N spots to return (default: 10)")
     ps.add_argument("--grid",  type=int, default=150, metavar="M",
                     help="Grid cell size in metres for clustering (default: 150)")
+    ps.add_argument("--elevation-url", default=None, metavar="URL",
+                    help="Custom Open-Topo-Data base URL for self-hosted instances "
+                         "(e.g. http://localhost:5000). Replaces the default provider.")
     ps.add_argument("--refresh", action="store_true",
                     help="Ignore cache and re-query Overpass")
     ps.add_argument("--horizon", action="store_true",
@@ -1521,6 +1577,19 @@ def main():
     base = os.path.splitext(os.path.basename(args.geojson))[0]
 
     print(f"Loading GeoJSON: {args.geojson}")
+
+    # Override elevation provider if custom URL given
+    if args.elevation_url:
+        ELEVATION_PROVIDERS.insert(0, {
+            "name": f"custom ({args.elevation_url})",
+            "url":  args.elevation_url.rstrip("/") + "/v1/srtm30m",
+            "build_payload": lambda locs: {
+                "locations": "|".join(f"{l['latitude']},{l['longitude']}" for l in locs)},
+            "parse":  lambda data: [r.get("elevation") for r in data.get("results", [])],
+            "method": "GET",
+            "batch_size": 100,
+        })
+        print(f"  Using custom elevation URL: {args.elevation_url}")
 
     if args.mode == "elevation":
         any_explicit = any(x is not None for x in
