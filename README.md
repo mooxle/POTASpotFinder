@@ -61,6 +61,7 @@ Finds the highest-elevation picnic tables, benches and loungers within the park.
 | `-b`, `--benches N` | Top-N benches |
 | `-l`, `--loungers N` | Top-N loungers |
 | `-o`, `--output FILE` | JSON output (default: `results_<park>.json`) |
+| `--elevation-url URL` | Custom Open-Topo-Data base URL for self-hosted instances |
 | `--html` | Generate HTML report |
 
 ```bash
@@ -102,6 +103,7 @@ Goes beyond elevation — scores every spot by what actually makes a POTA activa
 | `--grid M` | Grid cell size in metres for clustering (default: 150) |
 | `--refresh` | Ignore cache and re-query all APIs |
 | `--horizon` | Full horizon sampling (8 dirs × 3 distances). More accurate but slower on first run — cached after. |
+| `--elevation-url URL` | Custom Open-Topo-Data base URL for self-hosted instances |
 | `--html` | Generate interactive HTML map report |
 | `-o FILE` | JSON output (default: `score_<park>.json`) |
 
@@ -161,7 +163,7 @@ python3 pota_finder.py score DE-0042.geojson --top 15 --html
 
 ## 🐍 Python API
 
-Both modes are importable as clean functions — useful if you want to embed the logic in your own project.
+Both modes are importable as clean functions. All scoring weights, thresholds and algorithm parameters are exported as named constants and can be overridden before calling the API functions — no subclassing or config files needed.
 
 ```python
 from pota_finder import find_by_elevation, find_by_score
@@ -179,6 +181,29 @@ result = find_by_score("DE-0042.geojson", top=15, horizon=True)
 for spot in result["spots"]:
     print(spot["rank"], spot["elevation_m"], spot["score"],
           spot["horizon_open_pct"], spot["gmaps_url"])
+```
+
+### Configurable Constants
+
+Override any of these before calling the API to tune the algorithm for your use case:
+
+```python
+from pota_finder import (
+    COMFORT_POINTS,
+    SCORE_MAX_PROMINENCE, SCORE_MAX_QUIETNESS,
+    SCORE_MAX_HORIZON, SCORE_MAX_COMFORT, SCORE_MAX_ACCESSIBILITY,
+    PARKING_THRESHOLDS, ROAD_THRESHOLDS,
+    OVERPASS_ENDPOINTS, RATE_LIMIT_OPENTOPO,
+)
+
+# Make shelter more important (e.g. for rainy-climate parks)
+COMFORT_POINTS["shelter"] = 8
+
+# Widen the ideal quiet zone to 1km
+ROAD_THRESHOLDS[2] = (1000, 20)
+
+# Use only the primary Overpass endpoint
+OVERPASS_ENDPOINTS[:] = ["https://overpass-api.de/api/interpreter"]
 ```
 
 ### Output Format
@@ -261,6 +286,44 @@ This tool uses **OpenStreetMap** data, licensed under the [Open Database License
 > © OpenStreetMap contributors — [openstreetmap.org/copyright](https://www.openstreetmap.org/copyright)
 
 This attribution is automatically included in all HTML and JSON output.
+
+---
+
+## 🖥️ Self-Hosting the Elevation API
+
+For heavy usage, development, or fully offline operation you can run your own
+[Open-Topo-Data](https://github.com/ajnisbet/opentopodata) instance.
+This removes all rate limits and daily quotas.
+
+### Setup
+
+```bash
+# 1. Create a data directory
+mkdir -p ./data/srtm30m
+
+# 2. Download SRTM tiles for your region
+#    Interactive tile picker: https://dwtkns.com/srtm30m/
+#    For Germany (~20 tiles, N47E006 to N55E015)
+#    Place downloaded .hgt files into ./data/srtm30m/
+
+# 3. Start the server
+docker run -p 5000:5000 \
+  -v ./data:/app/data \
+  ghcr.io/ajnisbet/opentopodata:latest
+
+# 4. Verify
+curl "http://localhost:5000/v1/srtm30m?locations=50.517,9.238"
+```
+
+### Using it
+
+```bash
+python3 pota_finder.py score     DE-0042.geojson --elevation-url http://localhost:5000
+python3 pota_finder.py elevation DE-0042.geojson --elevation-url http://localhost:5000
+```
+
+SRTM tiles cover 60°N–56°S. Each tile covers 1°×1° and is named by its south-west
+corner (e.g. `N50E009.hgt` = 50–51°N, 9–10°E).
 
 ---
 
