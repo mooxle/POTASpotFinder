@@ -194,6 +194,7 @@ from pota_finder import (
     SCORE_MAX_HORIZON, SCORE_MAX_COMFORT, SCORE_MAX_ACCESSIBILITY,
     PARKING_THRESHOLDS, ROAD_THRESHOLDS,
     OVERPASS_ENDPOINTS, RATE_LIMIT_OPENTOPO,
+    CACHE_MAX_AGE_H,
 )
 
 # Make shelter more important (e.g. for rainy-climate parks)
@@ -204,6 +205,10 @@ ROAD_THRESHOLDS[2] = (1000, 20)
 
 # Use only the primary Overpass endpoint
 OVERPASS_ENDPOINTS[:] = ["https://overpass-api.de/api/interpreter"]
+
+# Keep Overpass cache valid for 7 days (default: 48 h)
+import pota_finder
+pota_finder.CACHE_MAX_AGE_H = 168
 ```
 
 ### Output Format
@@ -257,7 +262,7 @@ Both modes return the same JSON structure — `score`, `breakdown` and `horizon_
    - Phase 1 (all spots): centre elevation + 8 directions × 200m for prominence and near horizon
    - Phase 2 (top 50% only, with `--horizon`): 8 directions × 500m + 1000m for full line-of-sight score
 5. **Scoring** — all calculations local, no extra API calls
-6. **Two-layer cache** — Overpass result saved as `.cache_pota_<park>.json`; elevation results saved to `.cache_elevation.json`; subsequent runs require zero API calls
+6. **Two-layer cache** — Overpass result saved as `.cache_pota_<park>.json` (auto-expires after 48 h); elevation results saved to `.cache_elevation.json` (permanent); subsequent runs require zero API calls
 
 ### Caching behaviour
 
@@ -265,7 +270,9 @@ Both modes return the same JSON structure — `score`, `breakdown` and `horizon_
 |---|---|---|
 | First run | 1 call | ~27 batches (phase 1) |
 | `--horizon` first run | 1 call | ~51 batches (phase 1 + 2) |
-| Any subsequent run | 0 calls | 0 calls |
+| Any subsequent run (< 48 h) | 0 calls | 0 calls |
+| Re-run after 48 h | 1 call | 0 calls (elevation cached permanently) |
+| `--refresh` | 1 call | 0 calls |
 
 ---
 
@@ -354,6 +361,17 @@ This tool is designed for **personal, low-frequency use** by individual POTA act
 - OSM coverage varies. Dense tourist areas are well-mapped; remote parks may have fewer tagged amenities.
 - The horizon score uses a 200m near-ring by default. Add `--horizon` for full 200m/500m/1000m line-of-sight analysis.
 - `score` mode caches Overpass results automatically. Use `--refresh` only when you need fresh OSM data.
+
+---
+
+## 🧪 Tests
+
+A regression suite covers geometry, scoring, caching, and both modes end-to-end (all external API calls are mocked — no network access required).
+
+```bash
+pip install pytest
+pytest test_pota_finder.py -v
+```
 
 ---
 
