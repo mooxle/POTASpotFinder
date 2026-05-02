@@ -1072,19 +1072,149 @@ def _print_score_results(result):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _write_html_elevation(filename, result):
+    """Generates an elevation HTML report with Leaflet map + ranked table."""
     park_name = result["park"].get("name", "POTA Park")
+    spots     = result["spots"]
+    if not spots:
+        return
+
+    clat = sum(s["lat"] for s in spots) / len(spots)
+    clon = sum(s["lon"] for s in spots) / len(spots)
+
+    CAT_COLOR = {"picnic_table": "#e8a030", "bench": "#4caf78", "lounger": "#60aacc"}
+    CAT_LABEL = {"picnic_table": "Picnic Table", "bench": "Bench", "lounger": "Lounger"}
+
+    markers_js = []
+    for s in spots:
+        elev  = f"{s['elevation_m']:.0f}m" if s["elevation_m"] else "?"
+        col   = CAT_COLOR.get(s["category"], "#e8a030")
+        label = CAT_LABEL.get(s["category"], s["category"])
+        name  = s["tags"].get("name") or ""
+        name_part = f"<br><i>{html_lib.escape(name)}</i>" if name else ""
+        popup = (
+            f'<b>#{s["rank"]} \u2014 {elev}</b><br>'
+            f'{label}{name_part}<br>'
+            f'<a href="{s["osm_url"]}" target="_blank">OSM</a> '
+            f'<a href="{s["gmaps_url"]}" target="_blank">Google Maps</a>'
+        )
+        popup_safe = popup.replace("'", "&#39;")
+        markers_js.append(
+            f"  addMarker({s['lat']}, {s['lon']}, '{elev}', '{col}', '{popup_safe}');"
+        )
+    markers_js_str = "\n".join(markers_js)
+
     rows = ""
-    for s in result["spots"]:
-        elev = f"{s['elevation_m']:.0f}m" if s["elevation_m"] else "n/a"
-        name = html_lib.escape(s["tags"].get("name") or "")
-        rows += (f"<tr><td>{s['rank']}</td><td>{elev}</td>"
-                 f"<td>{html_lib.escape(s['category'])}</td><td>{name}</td>"
-                 f"<td><a href='{s['osm_url']}' target='_blank'>OSM</a> "
-                 f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>")
-    _write_html_file(filename, park_name,
-                     "Highest Amenities by Elevation",
-                     "<tr><th>#</th><th>Elevation</th><th>Type</th><th>Name</th><th>Links</th></tr>",
-                     rows, subtitle="Ranked by elevation")
+    for s in spots:
+        elev  = f"{s['elevation_m']:.0f}m" if s["elevation_m"] else "n/a"
+        col   = CAT_COLOR.get(s["category"], "#e8a030")
+        label = CAT_LABEL.get(s["category"], s["category"])
+        name  = html_lib.escape(s["tags"].get("name") or "")
+        name_part = f'<br><span style="color:#5a7060;font-size:11px">{name}</span>' if name else ""
+        slat, slon = s["lat"], s["lon"]
+        rows += (
+            f"<tr onclick='flyTo({slat},{slon})'>"
+            f"<td>{s['rank']}</td>"
+            f"<td style='font-size:20px;font-weight:700;color:{col}'>{elev}</td>"
+            f"<td>{label}{name_part}</td>"
+            f"<td style='color:#5a7060;font-size:11px'>{slat:.5f}<br>{slon:.5f}</td>"
+            f"<td style='white-space:nowrap'>"
+            f"<a href='{s['osm_url']}' target='_blank'>OSM</a>"
+            f"<a href='{s['gmaps_url']}' target='_blank'>Maps</a></td></tr>"
+        )
+
+    leaflet_css, leaflet_js = _fetch_leaflet_assets()
+    leaflet_css_tag = "<style>" + leaflet_css + "</style>" if leaflet_css \
+                      else '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>'
+    leaflet_js_tag  = "<script>" + leaflet_js + "</script>" if leaflet_js \
+                      else '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>POTA Elevation — {html_lib.escape(park_name)}</title>
+{leaflet_css_tag}
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0d1410;color:#c8d8cc;font-family:Inter,sans-serif;display:flex;flex-direction:column;min-height:100vh}}
+  header{{padding:20px 28px 12px;border-bottom:1px solid #1a2420}}
+  h1{{font-size:20px;color:#e8a030;font-weight:600}}
+  .sub{{color:#5a7060;font-size:11px;font-family:monospace;margin-top:4px}}
+  #map{{height:420px;width:100%;border-bottom:1px solid #1a2420}}
+  .content{{display:flex;flex:1;overflow:hidden}}
+  .table-wrap{{flex:1;overflow-y:auto}}
+  table{{width:100%;border-collapse:collapse;font-size:12px}}
+  th{{text-align:left;padding:8px 12px;color:#5a7060;font-weight:400;font-size:10px;
+      letter-spacing:2px;text-transform:uppercase;border-bottom:1px solid #2a3d35;
+      position:sticky;top:0;background:#0d1410;z-index:1}}
+  td{{padding:10px 12px;border-bottom:1px solid #141c18;vertical-align:middle;cursor:pointer}}
+  tr:hover td{{background:#141c18}}
+  a{{color:#e8a030;text-decoration:none;margin-right:8px;font-size:11px}}
+  a:nth-child(2){{color:#4caf78}}
+  footer{{padding:12px 28px;font-size:10px;color:#2a4030;font-family:monospace;border-top:1px solid #141c18}}
+  footer a{{color:#2a4030;font-size:10px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🏕 Highest Amenities — {html_lib.escape(park_name)}</h1>
+  <div class="sub">Ranked by elevation &nbsp;·&nbsp; Click a row to fly to the spot on the map</div>
+</header>
+
+<div id="map"></div>
+
+<div class="content">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>Elevation</th><th>Type</th><th>Coordinates</th><th>Links</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<footer>
+  © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap contributors</a>,
+  <a href="https://opendatacommons.org/licenses/odbl/" target="_blank">ODbL 1.0</a>
+  &nbsp;·&nbsp; Elevation: SRTM, public domain (NASA/USGS)
+  &nbsp;·&nbsp; Park boundaries: <a href="https://pota-map.info" target="_blank">pota-map.info</a>
+  &nbsp;·&nbsp; Map: <a href="https://leafletjs.com" target="_blank">Leaflet</a>
+</footer>
+
+{leaflet_js_tag}
+<script>
+var map = L.map('map').setView([{clat}, {clon}], 13);
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 18
+}}).addTo(map);
+
+function addMarker(lat, lon, label, color, popup) {{
+  var icon = L.divIcon({{
+    className: '',
+    html: '<div style="background:' + color + ';color:#0d1410;font-weight:700;font-size:10px;'
+        + 'width:42px;height:22px;border-radius:4px;display:flex;align-items:center;'
+        + 'justify-content:center;border:2px solid #0d1410;box-shadow:0 2px 6px rgba(0,0,0,.5)">'
+        + label + '</div>',
+    iconSize: [42, 22],
+    iconAnchor: [21, 11]
+  }});
+  L.marker([lat, lon], {{icon: icon}})
+    .addTo(map)
+    .bindPopup(popup, {{maxWidth: 260}});
+}}
+
+function flyTo(lat, lon) {{
+  map.flyTo([lat, lon], 15, {{duration: 1}});
+}}
+
+{markers_js_str}
+</script>
+</body>
+</html>"""
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
 
 def _fetch_leaflet_assets():
